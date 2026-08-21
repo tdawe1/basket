@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "basket",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-21",
+  "workers_dev": true,
+  "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "basket.dawe.dev",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "basket",
+      "database_id": "30a75aba-5251-4ee0-8e40-40196f5303c2",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

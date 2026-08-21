@@ -1,0 +1,9 @@
+node_modules
+dist
+data
+.git
+.env
+*.log
+README.md
+e2e-artifacts
+src/server/api.test.ts

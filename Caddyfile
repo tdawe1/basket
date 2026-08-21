@@ -1,0 +1,11 @@
+# Optional HTTPS reverse proxy. Point DNS at this machine, then:
+#   docker run --rm -d --name caddy --network host \
+#     -v $PWD/Caddyfile:/etc/caddy/Caddyfile \
+#     -v caddy-data:/data \
+#     caddy:2
+#
+# Replace basket.example.com with your hostname.
+
+basket.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
