@@ -1,7 +1,10 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createApp } from "./app.ts";
+import { LOGIN_MAX_FAILURES, resetLoginThrottleForTests } from "./auth.ts";
+import { SQL_FILE_MAX_BYTES } from "./files.ts";
 import { openNodeSql } from "./sql-node.ts";
+import type { Sql } from "./sql.ts";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -346,5 +349,63 @@ describe("api", { concurrency: 1 }, () => {
     assert.equal(sneak.status, 404);
     const isolatedNotes = (await api("/api/bootstrap")).json as { notes: unknown[] };
     assert.equal(isolatedNotes.notes.length, 0);
+
+    cookieJar.clear();
+    await api("/api/auth/login", { body: { username: "nora", password: "password1" } });
+    const oversized = await app.request(`/api/notes/${note.id}/file`, {
+      method: "PUT",
+      headers: {
+        cookie: cookieHeader(),
+        "content-type": "application/pdf",
+        "content-length": String(SQL_FILE_MAX_BYTES + 1),
+        "x-file-name": "huge.pdf",
+      },
+      body: "%PDF-1.4\n",
+    });
+    assert.equal(oversized.status, 413);
+  });
+
+  it("throttles repeated failed logins", async () => {
+    resetLoginThrottleForTests();
+    cookieJar.clear();
+    let last = { status: 0, json: null as unknown };
+    for (let i = 0; i < LOGIN_MAX_FAILURES; i++) {
+      last = await api("/api/auth/login", { body: { username: "throttleuser", password: "wrong-password" } });
+      assert.equal(last.status, 401);
+    }
+    const blocked = await api("/api/auth/login", {
+      body: { username: "throttleuser", password: "wrong-password" },
+    });
+    assert.equal(blocked.status, 429);
+  });
+
+  it("register rolls back so a failed attempt leaves no extra household", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "basket-rollback-"));
+    const inner = await openNodeSql(join(dir, "test.sqlite"));
+    const sql: Sql = {
+      exec: (q) => inner.exec(q),
+      get: (q, ...p) => inner.get(q, ...p),
+      all: (q, ...p) => inner.all(q, ...p),
+      transaction: (fn) => inner.transaction(fn),
+      run: async (q, ...p) => {
+        if (q.includes("INSERT INTO sessions")) throw new Error("injected session failure");
+        return inner.run(q, ...p);
+      },
+    };
+    const isolated = createApp(() => sql);
+    const before = await inner.get<{ n: number }>("SELECT COUNT(*) AS n FROM households");
+    const res = await isolated.request("/api/auth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        householdName: "Rollback House",
+        displayName: "Rae",
+        username: "rae_rollback",
+        password: "password1",
+      }),
+    });
+    assert.equal(res.status, 500);
+    const after = await inner.get<{ n: number }>("SELECT COUNT(*) AS n FROM households");
+    assert.equal(Number(after?.n ?? 0), Number(before?.n ?? 0));
   });
 });

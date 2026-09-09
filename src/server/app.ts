@@ -5,9 +5,12 @@ import { CATEGORY_IDS, USER_COLORS, guessCategory } from "../shared/categories.t
 import {
   COOKIE,
   SESSION_MS,
+  clearLoginFailures,
   hashPassword,
+  loginAllowed,
   newId,
   newInviteCode,
+  recordLoginFailure,
   validateDisplayName,
   validatePassword,
   validateUsername,
@@ -123,36 +126,47 @@ export function createApp(
     const listId = newId();
     const invite = newInviteCode();
     const sessionId = newId() + newId();
+    const passwordHash = await hashPassword(password);
 
-    await sql.run(
-      "INSERT INTO households (id, name, invite_code, created_at) VALUES (?, ?, ?, ?)",
-      householdId,
-      householdName,
-      invite,
-      now,
-    );
-    await sql.run(
-      `INSERT INTO users (id, household_id, username, password_hash, display_name, color, created_at, last_seen)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      userId,
-      householdId,
-      username,
-      await hashPassword(password),
-      displayName,
-      USER_COLORS[0],
-      now,
-      now,
-    );
-    await sql.run(
-      "INSERT INTO lists (id, household_id, name, emoji, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      listId,
-      householdId,
-      "Groceries",
-      "🛒",
-      0,
-      now,
-    );
-    await createSession(sql, userId, sessionId);
+    try {
+      await sql.transaction(async () => {
+        await sql.run(
+          "INSERT INTO households (id, name, invite_code, created_at) VALUES (?, ?, ?, ?)",
+          householdId,
+          householdName,
+          invite,
+          now,
+        );
+        await sql.run(
+          `INSERT INTO users (id, household_id, username, password_hash, display_name, color, created_at, last_seen)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          userId,
+          householdId,
+          username,
+          passwordHash,
+          displayName,
+          USER_COLORS[0],
+          now,
+          now,
+        );
+        await sql.run(
+          "INSERT INTO lists (id, household_id, name, emoji, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          listId,
+          householdId,
+          "Groceries",
+          "🛒",
+          0,
+          now,
+        );
+        await createSession(sql, userId, sessionId);
+      });
+    } catch {
+      await sql.run("DELETE FROM sessions WHERE id = ?", sessionId).catch(() => undefined);
+      await sql.run("DELETE FROM lists WHERE id = ?", listId).catch(() => undefined);
+      await sql.run("DELETE FROM users WHERE id = ?", userId).catch(() => undefined);
+      await sql.run("DELETE FROM households WHERE id = ?", householdId).catch(() => undefined);
+      return c.json({ error: "Could not create household." }, 500);
+    }
     setSession(c, sessionId);
     return c.json({ ok: true });
   });
@@ -204,10 +218,15 @@ export function createApp(
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const username = clip(body.username, 32);
     const password = String(body.password ?? "");
+    if (!loginAllowed(username)) {
+      return c.json({ error: "Too many sign-in attempts. Try again later." }, 429);
+    }
     const user = await getUserByUsername(sql, username);
     if (!user || !(await verifyPassword(password, user.password_hash))) {
+      recordLoginFailure(username);
       return c.json({ error: "Wrong username or password." }, 401);
     }
+    clearLoginFailures(username);
     const sessionId = newId() + newId();
     await createSession(sql, user.id, sessionId);
     setSession(c, sessionId);
@@ -544,6 +563,11 @@ export function createApp(
     if (!existing) return c.json({ error: "Note not found." }, 404);
 
     const contentType = c.req.header("content-type") || "";
+    const cap = files.maxBytes ?? MAX_NOTE_FILE_BYTES;
+    const declaredLength = Number(c.req.header("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > cap) {
+      return c.json({ error: "File is too large (max 8 MB)." }, 413);
+    }
     let bytes: Uint8Array;
     let filename = clip(c.req.header("x-file-name"), 120) || "attachment";
     let declared = contentType;
@@ -558,11 +582,15 @@ export function createApp(
       bytes = new Uint8Array(await c.req.arrayBuffer());
     }
     if (!bytes.byteLength) return c.json({ error: "Attach a PDF or image." }, 400);
-    if (bytes.byteLength > MAX_NOTE_FILE_BYTES) return c.json({ error: "File is too large (max 8 MB)." }, 413);
+    if (bytes.byteLength > cap) return c.json({ error: "File is too large (max 8 MB)." }, 413);
     const mime = sniffNoteFile(bytes, declared, filename);
     if (!mime) return c.json({ error: "That file type is not allowed." }, 400);
 
-    await files.put(id, { bytes, mime });
+    try {
+      await files.put(id, { bytes, mime });
+    } catch {
+      return c.json({ error: "File is too large (max 8 MB)." }, 413);
+    }
     const storedName = safeDownloadName(filename, mime);
     await sql.run(
       "UPDATE notes SET file_name = ?, file_mime = ?, file_size = ?, updated_at = ? WHERE id = ?",

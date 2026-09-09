@@ -1,6 +1,7 @@
 import type { Sql } from "./sql.ts";
 
 export const MAX_NOTE_FILE_BYTES = 8 * 1024 * 1024;
+export const SQL_FILE_MAX_BYTES = 700_000;
 
 export type StoredFile = {
   bytes: Uint8Array;
@@ -8,6 +9,7 @@ export type StoredFile = {
 };
 
 export type FileStore = {
+  maxBytes?: number;
   put(id: string, file: StoredFile): Promise<void>;
   get(id: string): Promise<StoredFile | undefined>;
   delete(id: string): Promise<void>;
@@ -84,6 +86,7 @@ export function memoryFiles(): FileStore {
 
 export function sqlFiles(sql: Sql): FileStore {
   return {
+    maxBytes: SQL_FILE_MAX_BYTES,
     async put(id, file) {
       const data = bytesToB64(file.bytes);
       await sql.run("DELETE FROM note_blobs WHERE id = ?", id);
@@ -104,7 +107,11 @@ export function sqlFiles(sql: Sql): FileStore {
 }
 
 export function safeDownloadName(name: string, mime: string): string {
-  const trimmed = name.replace(/[/\\?%*:|"<>]/g, "").trim() || "attachment";
+  const trimmed =
+    name
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .replace(/[/\\?%*:|"<>]/g, "")
+      .trim() || "attachment";
   if (trimmed.includes(".")) return trimmed;
   if (mime === "application/pdf") return `${trimmed}.pdf`;
   if (mime === "image/png") return `${trimmed}.png`;

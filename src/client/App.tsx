@@ -65,15 +65,21 @@ function upcomingTrips(reminders: Reminder[]): Reminder[] {
     .sort((a, b) => a.dueAt - b.dueAt);
 }
 
+type Toast = { msg: string; undo?: () => void };
+
 function useToast() {
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const timer = useRef<number>(0);
-  const show = useCallback((msg: string) => {
-    setToast(msg);
+  const show = useCallback((msg: string, undo?: () => void) => {
+    setToast({ msg, undo });
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setToast(null), 2200);
+    timer.current = window.setTimeout(() => setToast(null), undo ? 6000 : 2200);
   }, []);
-  return { toast, show };
+  const clear = useCallback(() => {
+    window.clearTimeout(timer.current);
+    setToast(null);
+  }, []);
+  return { toast, show, clear };
 }
 
 export function App() {
@@ -99,7 +105,7 @@ export function App() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeListId, setActiveListId] = useState<string | null>(null);
   const [online, setOnline] = useState<string[]>([]);
-  const { toast, show } = useToast();
+  const { toast, show, clear } = useToast();
   const seenReminders = useRef<Set<string>>(loadSeenReminders());
 
   useEffect(() => {
@@ -241,6 +247,7 @@ export function App() {
         setTheme={setTheme}
         onSelectList={(id) => setActiveListId(id)}
         onToast={show}
+        onPatchItems={setItems}
         onLogout={async () => {
           await api.logout();
           setUser(null);
@@ -251,7 +258,24 @@ export function App() {
         onHousehold={(h) => setHousehold(h)}
         onRefresh={load}
       />
-      {toast && <div className="toast">{toast}</div>}
+      {toast && (
+        <div className="toast">
+          <span>{toast.msg}</span>
+          {toast.undo && (
+            <button
+              type="button"
+              className="toast-undo"
+              onClick={() => {
+                const run = toast.undo;
+                clear();
+                run?.();
+              }}
+            >
+              {t(lang, "undo")}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
   })();
@@ -378,6 +402,7 @@ function Home({
   setTheme,
   onSelectList,
   onToast,
+  onPatchItems,
   onLogout,
   onHousehold,
   onRefresh,
@@ -393,7 +418,8 @@ function Home({
   theme: Theme;
   setTheme: (t: Theme) => void;
   onSelectList: (id: string) => void;
-  onToast: (s: string) => void;
+  onToast: (s: string, undo?: () => void) => void;
+  onPatchItems: (fn: (items: Item[]) => Item[]) => void;
   onLogout: () => Promise<void>;
   onHousehold: (h: Household) => void;
   onRefresh: () => Promise<void>;
@@ -554,20 +580,53 @@ function Home({
                 <ListBody
                   items={listItems}
                   onToggle={async (item) => {
+                    const previous = item;
+                    const nextChecked = !item.checked;
+                    onPatchItems((current) =>
+                      current.map((row) =>
+                        row.id === item.id
+                          ? { ...row, checked: nextChecked, checkedBy: nextChecked ? user : null }
+                          : row,
+                      ),
+                    );
                     try {
                       if (navigator.vibrate) navigator.vibrate(8);
-                      await api.updateItem(item.id, { checked: !item.checked });
-                      await onRefresh();
+                      const updated = await api.updateItem(item.id, { checked: nextChecked });
+                      onPatchItems((current) => current.map((row) => (row.id === updated.id ? updated : row)));
                     } catch (error) {
+                      onPatchItems((current) => current.map((row) => (row.id === previous.id ? previous : row)));
                       onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
                     }
                   }}
                   onEdit={setEditing}
                   onClear={async () => {
                     if (!activeList) return;
-                    await api.clearChecked(activeList.id);
-                    await onRefresh();
-                    onToast(t("checkedCleared"));
+                    const snapshot = listItems.filter((row) => row.checked);
+                    if (snapshot.length === 0) return;
+                    const listId = activeList.id;
+                    onPatchItems((current) => current.filter((row) => row.listId !== listId || !row.checked));
+                    try {
+                      await api.clearChecked(listId);
+                      onToast(t("checkedCleared"), async () => {
+                        try {
+                          for (const row of snapshot) {
+                            const created = await api.addItem(listId, {
+                              name: row.name,
+                              quantity: row.quantity,
+                              category: row.category,
+                              notes: row.notes,
+                            });
+                            if (row.checked) await api.updateItem(created.id, { checked: true });
+                          }
+                          await onRefresh();
+                        } catch (error) {
+                          onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                        }
+                      });
+                    } catch (error) {
+                      onPatchItems((current) => [...current, ...snapshot]);
+                      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                    }
                   }}
                 />
               ) : (

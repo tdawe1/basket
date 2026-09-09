@@ -699,6 +699,17 @@ html[data-theme="dark"] .item.checked .check {
   font-weight: 500;
   z-index: 30;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toast-undo {
+  border: 0;
+  background: transparent;
+  color: var(--sage);
+  font-weight: 700;
+  padding: 0;
 }
 
 .checked-head {

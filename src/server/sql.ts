@@ -5,6 +5,7 @@ export type Sql = {
   run(sql: string, ...params: SqlValue[]): Promise<void>;
   get<T>(sql: string, ...params: SqlValue[]): Promise<T | undefined>;
   all<T>(sql: string, ...params: SqlValue[]): Promise<T[]>;
+  transaction<T>(fn: () => Promise<T>): Promise<T>;
 };
 
 export const SCHEMA = `

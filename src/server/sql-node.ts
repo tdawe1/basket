@@ -17,6 +17,21 @@ export function fromNode(db: DatabaseSync): Sql {
     async all<T>(sql: string, ...params: SqlValue[]) {
       return db.prepare(sql).all(...params) as T[];
     },
+    async transaction<T>(fn: () => Promise<T>): Promise<T> {
+      db.exec("BEGIN");
+      try {
+        const result = await fn();
+        db.exec("COMMIT");
+        return result;
+      } catch (err) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* ignore */
+        }
+        throw err;
+      }
+    },
   };
 }
 

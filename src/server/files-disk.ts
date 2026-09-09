@@ -5,6 +5,7 @@ import type { FileStore } from "./files.ts";
 export function diskFiles(dir: string): FileStore {
   mkdirSync(dir, { recursive: true });
   return {
+    maxBytes: 8 * 1024 * 1024,
     async put(id, file) {
       writeFileSync(join(dir, `${id}.bin`), file.bytes);
       writeFileSync(join(dir, `${id}.mime`), file.mime, "utf8");

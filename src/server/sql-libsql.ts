@@ -21,6 +21,21 @@ export function fromLibsql(client: LibsqlClient): Sql {
       const result = await client.execute({ sql, args: params });
       return result.rows as T[];
     },
+    async transaction<T>(fn: () => Promise<T>): Promise<T> {
+      await client.executeMultiple("BEGIN");
+      try {
+        const result = await fn();
+        await client.executeMultiple("COMMIT");
+        return result;
+      } catch (err) {
+        try {
+          await client.executeMultiple("ROLLBACK");
+        } catch {
+          /* ignore */
+        }
+        throw err;
+      }
+    },
   };
 }
 

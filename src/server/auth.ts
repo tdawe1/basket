@@ -97,3 +97,44 @@ export function validateDisplayName(name: string): string | null {
   if (t.length > 40) return "Name is too long.";
   return null;
 }
+
+export const LOGIN_MAX_FAILURES = 5;
+export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+type FailRow = { n: number; start: number };
+const loginFails = new Map<string, FailRow>();
+
+function loginKey(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+export function loginAllowed(username: string, now = Date.now()): boolean {
+  const key = loginKey(username);
+  if (!key) return true;
+  const row = loginFails.get(key);
+  if (!row) return true;
+  if (now - row.start > LOGIN_WINDOW_MS) {
+    loginFails.delete(key);
+    return true;
+  }
+  return row.n < LOGIN_MAX_FAILURES;
+}
+
+export function recordLoginFailure(username: string, now = Date.now()): void {
+  const key = loginKey(username);
+  if (!key) return;
+  const row = loginFails.get(key);
+  if (!row || now - row.start > LOGIN_WINDOW_MS) {
+    loginFails.set(key, { n: 1, start: now });
+    return;
+  }
+  row.n += 1;
+}
+
+export function clearLoginFailures(username: string): void {
+  loginFails.delete(loginKey(username));
+}
+
+export function resetLoginThrottleForTests(): void {
+  loginFails.clear();
+}

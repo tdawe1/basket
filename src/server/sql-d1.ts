@@ -36,5 +36,8 @@ export function fromD1(db: D1Like): Sql {
         .all<T>();
       return result.results ?? [];
     },
+    async transaction<T>(fn: () => Promise<T>): Promise<T> {
+      return fn();
+    },
   };
 }
