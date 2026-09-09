@@ -4,6 +4,7 @@ import { networkInterfaces } from "node:os";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createApp } from "./app.ts";
+import { diskFiles } from "./files-disk.ts";
 import { openNodeSql } from "./sql-node.ts";
 
 function lanUrls(port: number): string[] {
@@ -20,7 +21,8 @@ function lanUrls(port: number): string[] {
 
 const dataDir = process.env.DATA_DIR || join(process.cwd(), "data");
 const sql = await openNodeSql(join(dataDir, "basket.sqlite"));
-const app = createApp(() => sql);
+const files = diskFiles(join(dataDir, "files"));
+const app = createApp(() => sql, () => files);
 
 if (process.env.NODE_ENV === "production") {
   app.use("/*", serveStatic({ root: "./dist/client" }));

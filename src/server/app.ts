@@ -19,16 +19,21 @@ import {
   getHouseholdByInvite,
   getItemForHousehold,
   getListForHousehold,
+  getNoteForHousehold,
+  getReminderForHousehold,
   getSessionUser,
   getUserByUsername,
   listItems,
   listLists,
+  listNotes,
+  listReminders,
   mapList,
   memberCount,
   nextListSort,
   suggestions,
   type UserRow,
 } from "./db.ts";
+import { MAX_NOTE_FILE_BYTES, safeDownloadName, sniffNoteFile, sqlFiles, type FileStore } from "./files.ts";
 import type { Sql } from "./sql.ts";
 
 export type AppBindings = {
@@ -40,7 +45,7 @@ export type AppBindings = {
 
 type Env = {
   Bindings: AppBindings;
-  Variables: { sql: Sql };
+  Variables: { sql: Sql; files: FileStore };
 };
 
 function clip(value: unknown, max: number): string {
@@ -78,13 +83,18 @@ function isUser(value: UserRow | Response): value is UserRow {
   return !(value instanceof Response);
 }
 
-export function createApp(getSql: (c: Context<Env>) => Sql | Promise<Sql>) {
+export function createApp(
+  getSql: (c: Context<Env>) => Sql | Promise<Sql>,
+  getFiles?: (c: Context<Env>) => FileStore | Promise<FileStore>,
+) {
   const app = new Hono<Env>();
 
   app.get("/api/health", (c) => c.json({ ok: true }));
 
   app.use("/api/*", async (c, next) => {
-    c.set("sql", await getSql(c));
+    const sql = await getSql(c);
+    c.set("sql", sql);
+    c.set("files", getFiles ? await getFiles(c) : sqlFiles(sql));
     await next();
   });
 
@@ -229,6 +239,8 @@ export function createApp(getSql: (c: Context<Env>) => Sql | Promise<Sql>) {
       household,
       lists: await listLists(sql, user.household_id),
       items: await listItems(sql, user.household_id),
+      reminders: await listReminders(sql, user.household_id),
+      notes: await listNotes(sql, user.household_id),
     });
   });
 
@@ -391,6 +403,216 @@ export function createApp(getSql: (c: Context<Env>) => Sql | Promise<Sql>) {
     if (!existing) return c.json({ error: "Item not found." }, 404);
     await sql.run("DELETE FROM items WHERE id = ?", id);
     return c.body(null, 204);
+  });
+
+  app.post("/api/reminders", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const kind = body.kind === "nudge" ? "nudge" : body.kind === "trip" ? "trip" : "";
+    if (!kind) return c.json({ error: "Reminder type is required." }, 400);
+
+    const listIdRaw = clip(body.listId, 40);
+    const listId = listIdRaw || null;
+    let listName = "";
+    let listEmoji = "";
+    if (listId) {
+      const list = await getListForHousehold(sql, listId, user.household_id);
+      if (!list) return c.json({ error: "List not found." }, 404);
+      listName = list.name;
+      listEmoji = list.emoji;
+    }
+
+    const now = Date.now();
+    let dueAt = Number(body.dueAt);
+    let durationMin = Number(body.durationMin);
+    if (kind === "nudge") {
+      dueAt = now;
+      durationMin = 0;
+    } else {
+      if (!Number.isFinite(dueAt)) return c.json({ error: "Pick a time in the future." }, 400);
+      if (dueAt < now - 60_000) return c.json({ error: "Pick a time in the future." }, 400);
+      if (dueAt > now + 366 * 24 * 60 * 60 * 1000) {
+        return c.json({ error: "Pick a time in the future." }, 400);
+      }
+      if (!Number.isFinite(durationMin)) durationMin = 60;
+      durationMin = Math.min(240, Math.max(15, Math.round(durationMin)));
+    }
+
+    const fallback =
+      kind === "nudge"
+        ? listName
+          ? `Nudge: ${listName}`
+          : "Nudge"
+        : listName
+          ? `Shop: ${listEmoji} ${listName}`
+          : "Shopping trip";
+    const title = clip(body.title, 120) || fallback;
+
+    const id = newId();
+    await sql.run(
+      `INSERT INTO reminders (id, household_id, list_id, kind, title, due_at, duration_min, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id,
+      user.household_id,
+      listId,
+      kind,
+      title,
+      dueAt,
+      durationMin,
+      user.id,
+      now,
+    );
+    return c.json(await getReminderForHousehold(sql, id, user.household_id));
+  });
+
+  app.delete("/api/reminders/:id", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const id = c.req.param("id");
+    const existing = await getReminderForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Reminder not found." }, 404);
+    await sql.run("DELETE FROM reminders WHERE id = ?", id);
+    return c.body(null, 204);
+  });
+
+  app.post("/api/notes", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const title = clip(body.title, 120) || "Untitled";
+    const text = clip(body.body, 8000);
+    const now = Date.now();
+    const id = newId();
+    await sql.run(
+      `INSERT INTO notes (id, household_id, title, body, file_name, file_mime, file_size, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
+      id,
+      user.household_id,
+      title,
+      text,
+      user.id,
+      now,
+      now,
+    );
+    return c.json(await getNoteForHousehold(sql, id, user.household_id));
+  });
+
+  app.patch("/api/notes/:id", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const id = c.req.param("id");
+    const existing = await getNoteForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Note not found." }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const title = body.title !== undefined ? clip(body.title, 120) || "Untitled" : existing.title;
+    const text = body.body !== undefined ? clip(body.body, 8000) : existing.body;
+    await sql.run(
+      "UPDATE notes SET title = ?, body = ?, updated_at = ? WHERE id = ?",
+      title,
+      text,
+      Date.now(),
+      id,
+    );
+    return c.json(await getNoteForHousehold(sql, id, user.household_id));
+  });
+
+  app.delete("/api/notes/:id", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const files = c.get("files");
+    const id = c.req.param("id");
+    const existing = await getNoteForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Note not found." }, 404);
+    await files.delete(id);
+    await sql.run("DELETE FROM notes WHERE id = ?", id);
+    return c.body(null, 204);
+  });
+
+  app.put("/api/notes/:id/file", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const files = c.get("files");
+    const id = c.req.param("id");
+    const existing = await getNoteForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Note not found." }, 404);
+
+    const contentType = c.req.header("content-type") || "";
+    let bytes: Uint8Array;
+    let filename = clip(c.req.header("x-file-name"), 120) || "attachment";
+    let declared = contentType;
+    if (contentType.includes("multipart/form-data")) {
+      const parsed = await c.req.parseBody();
+      const uploaded = parsed.file;
+      if (!(uploaded instanceof File)) return c.json({ error: "Attach a PDF or image." }, 400);
+      bytes = new Uint8Array(await uploaded.arrayBuffer());
+      filename = clip(uploaded.name, 120) || filename;
+      declared = uploaded.type || declared;
+    } else {
+      bytes = new Uint8Array(await c.req.arrayBuffer());
+    }
+    if (!bytes.byteLength) return c.json({ error: "Attach a PDF or image." }, 400);
+    if (bytes.byteLength > MAX_NOTE_FILE_BYTES) return c.json({ error: "File is too large (max 8 MB)." }, 413);
+    const mime = sniffNoteFile(bytes, declared, filename);
+    if (!mime) return c.json({ error: "That file type is not allowed." }, 400);
+
+    await files.put(id, { bytes, mime });
+    const storedName = safeDownloadName(filename, mime);
+    await sql.run(
+      "UPDATE notes SET file_name = ?, file_mime = ?, file_size = ?, updated_at = ? WHERE id = ?",
+      storedName,
+      mime,
+      bytes.byteLength,
+      Date.now(),
+      id,
+    );
+    return c.json(await getNoteForHousehold(sql, id, user.household_id));
+  });
+
+  app.get("/api/notes/:id/file", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const files = c.get("files");
+    const id = c.req.param("id");
+    const existing = await getNoteForHousehold(sql, id, user.household_id);
+    if (!existing || !existing.fileMime) return c.json({ error: "Note not found." }, 404);
+    const stored = await files.get(id);
+    if (!stored) return c.json({ error: "Note not found." }, 404);
+    const name = safeDownloadName(existing.fileName || "attachment", stored.mime);
+    const inline = c.req.query("download") !== "1";
+    const payload = Uint8Array.from(stored.bytes);
+    return new Response(payload, {
+      headers: {
+        "content-type": stored.mime,
+        "content-length": String(payload.byteLength),
+        "content-disposition": `${inline ? "inline" : "attachment"}; filename="${name.replace(/"/g, "")}"`,
+        "cache-control": "private, max-age=60",
+      },
+    });
+  });
+
+  app.delete("/api/notes/:id/file", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const files = c.get("files");
+    const id = c.req.param("id");
+    const existing = await getNoteForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Note not found." }, 404);
+    await files.delete(id);
+    await sql.run(
+      "UPDATE notes SET file_name = NULL, file_mime = NULL, file_size = NULL, updated_at = ? WHERE id = ?",
+      Date.now(),
+      id,
+    );
+    return c.json(await getNoteForHousehold(sql, id, user.household_id));
   });
 
   app.post("/api/lists/:id/clear-checked", async (c) => {

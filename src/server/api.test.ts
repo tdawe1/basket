@@ -185,4 +185,166 @@ describe("api", { concurrency: 1 }, () => {
     });
     assert.equal(dup.status, 409);
   });
+
+  it("reminders: nudge, trip, calendar payload, isolation", async () => {
+    cookieJar.clear();
+    const created = await api("/api/auth/register", {
+      body: {
+        householdName: "Remind House",
+        displayName: "Riley",
+        username: "riley",
+        password: "password1",
+      },
+    });
+    assert.equal(created.status, 200);
+
+    const boot = (await api("/api/bootstrap")).json as {
+      lists: Array<{ id: string; name: string }>;
+      reminders: unknown[];
+    };
+    assert.equal(Array.isArray(boot.reminders), true);
+    assert.equal(boot.reminders.length, 0);
+    const listId = boot.lists[0].id;
+
+    const missingKind = await api("/api/reminders", { body: { listId } });
+    assert.equal(missingKind.status, 400);
+
+    const past = await api("/api/reminders", {
+      body: { kind: "trip", listId, dueAt: Date.now() - 5 * 60_000 },
+    });
+    assert.equal(past.status, 400);
+
+    const nudge = (
+      await api("/api/reminders", {
+        body: { kind: "nudge", listId, title: "Please pick up milk" },
+      })
+    ).json as {
+      id: string;
+      kind: string;
+      title: string;
+      listId: string;
+      durationMin: number;
+      createdBy: { displayName: string };
+    };
+    assert.equal(nudge.kind, "nudge");
+    assert.equal(nudge.title, "Please pick up milk");
+    assert.equal(nudge.listId, listId);
+    assert.equal(nudge.durationMin, 0);
+    assert.equal(nudge.createdBy.displayName, "Riley");
+
+    const dueAt = Date.now() + 2 * 60 * 60 * 1000;
+    const trip = (
+      await api("/api/reminders", {
+        body: { kind: "trip", listId, dueAt, durationMin: 90, title: "Saturday shop" },
+      })
+    ).json as { id: string; kind: string; dueAt: number; durationMin: number; title: string };
+    assert.equal(trip.kind, "trip");
+    assert.equal(trip.title, "Saturday shop");
+    assert.equal(trip.durationMin, 90);
+    assert.equal(trip.dueAt, dueAt);
+
+    const after = (await api("/api/bootstrap")).json as {
+      reminders: Array<{ id: string; kind: string }>;
+    };
+    assert.equal(after.reminders.length, 2);
+    assert.ok(after.reminders.some((r) => r.id === trip.id));
+    assert.ok(after.reminders.some((r) => r.id === nudge.id));
+
+    const gone = await api(`/api/reminders/${trip.id}`, { method: "DELETE" });
+    assert.equal(gone.status, 204);
+    const trimmed = (await api("/api/bootstrap")).json as { reminders: Array<{ id: string }> };
+    assert.equal(trimmed.reminders.some((r) => r.id === trip.id), false);
+
+    cookieJar.clear();
+    const other = await api("/api/auth/register", {
+      body: {
+        householdName: "Other remind",
+        displayName: "Pat",
+        username: "patremind",
+        password: "password3",
+      },
+    });
+    assert.equal(other.status, 200);
+    const sneak = await api(`/api/reminders/${nudge.id}`, { method: "DELETE" });
+    assert.equal(sneak.status, 404);
+    const isolated = (await api("/api/bootstrap")).json as { reminders: unknown[] };
+    assert.equal(isolated.reminders.length, 0);
+  });
+
+  it("notes: text, pdf upload, isolation", async () => {
+    cookieJar.clear();
+    const created = await api("/api/auth/register", {
+      body: {
+        householdName: "Notes House",
+        displayName: "Nora",
+        username: "nora",
+        password: "password1",
+      },
+    });
+    assert.equal(created.status, 200);
+
+    const boot = (await api("/api/bootstrap")).json as { notes: unknown[] };
+    assert.equal(Array.isArray(boot.notes), true);
+    assert.equal(boot.notes.length, 0);
+
+    const note = (
+      await api("/api/notes", {
+        body: { title: "School letter", body: "Bring water bottle." },
+      })
+    ).json as { id: string; title: string; body: string; fileName: string | null };
+    assert.equal(note.title, "School letter");
+    assert.equal(note.body, "Bring water bottle.");
+    assert.equal(note.fileName, null);
+
+    const pdf = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n");
+    const upload = await app.request(`/api/notes/${note.id}/file`, {
+      method: "PUT",
+      headers: {
+        cookie: cookieHeader(),
+        "content-type": "application/pdf",
+        "x-file-name": "letter.pdf",
+      },
+      body: pdf,
+    });
+    assert.equal(upload.status, 200);
+    const uploaded = (await upload.json()) as { fileName: string; fileMime: string; fileSize: number };
+    assert.equal(uploaded.fileName, "letter.pdf");
+    assert.equal(uploaded.fileMime, "application/pdf");
+    assert.equal(uploaded.fileSize, pdf.byteLength);
+
+    const fileRes = await app.request(`/api/notes/${note.id}/file`, {
+      headers: { cookie: cookieHeader() },
+    });
+    assert.equal(fileRes.status, 200);
+    assert.equal(fileRes.headers.get("content-type"), "application/pdf");
+    const got = Buffer.from(await fileRes.arrayBuffer());
+    assert.equal(got.equals(pdf), true);
+
+    const exe = await app.request(`/api/notes/${note.id}/file`, {
+      method: "PUT",
+      headers: {
+        cookie: cookieHeader(),
+        "content-type": "application/pdf",
+        "x-file-name": "virus.exe",
+      },
+      body: Buffer.from("MZ this is not a pdf"),
+    });
+    assert.equal(exe.status, 400);
+
+    cookieJar.clear();
+    await api("/api/auth/register", {
+      body: {
+        householdName: "Other notes",
+        displayName: "Pat",
+        username: "patnotes",
+        password: "password3",
+      },
+    });
+    const sneak = await app.request(`/api/notes/${note.id}/file`, {
+      headers: { cookie: cookieHeader() },
+    });
+    assert.equal(sneak.status, 404);
+    const isolatedNotes = (await api("/api/bootstrap")).json as { notes: unknown[] };
+    assert.equal(isolatedNotes.notes.length, 0);
+  });
 });

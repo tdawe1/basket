@@ -1,4 +1,4 @@
-import type { Bootstrap, Household, Item, List, Suggestion } from "../shared/types.ts";
+import type { Bootstrap, Household, Item, List, Note, Reminder, Suggestion } from "../shared/types.ts";
 
 export class ApiError extends Error {
   status: number;
@@ -61,4 +61,34 @@ export const api = {
     request<{ removed: number }>(`/api/lists/${listId}/clear-checked`, { method: "POST", json: {} }),
   suggestions: (q: string) =>
     request<Suggestion[]>(`/api/suggestions?q=${encodeURIComponent(q)}`),
+  createReminder: (body: {
+    kind: "trip" | "nudge";
+    title?: string;
+    listId?: string;
+    dueAt?: number;
+    durationMin?: number;
+  }) => request<Reminder>("/api/reminders", { method: "POST", json: body }),
+  deleteReminder: (id: string) => request(`/api/reminders/${id}`, { method: "DELETE" }),
+  createNote: (body: { title?: string; body?: string }) =>
+    request<Note>("/api/notes", { method: "POST", json: body }),
+  updateNote: (id: string, body: Partial<{ title: string; body: string }>) =>
+    request<Note>(`/api/notes/${id}`, { method: "PATCH", json: body }),
+  deleteNote: (id: string) => request(`/api/notes/${id}`, { method: "DELETE" }),
+  uploadNoteFile: async (id: string, file: File) => {
+    const res = await fetch(`/api/notes/${id}/file`, {
+      method: "PUT",
+      credentials: "include",
+      body: (() => {
+        const data = new FormData();
+        data.set("file", file);
+        return data;
+      })(),
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) throw new ApiError(res.status, data.error || "Something went wrong.");
+    return data as Note;
+  },
+  deleteNoteFile: (id: string) => request<Note>(`/api/notes/${id}/file`, { method: "DELETE" }),
+  noteFileUrl: (id: string, download = false) =>
+    `/api/notes/${id}/file${download ? "?download=1" : ""}`,
 };

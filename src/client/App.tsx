@@ -1,31 +1,29 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  buildIcs,
+  eventDescription,
+  fromLocalInputValue,
+  googleCalendarUrl,
+  outlookCalendarUrl,
+  presetDue,
+  toLocalInputValue,
+  type DuePreset,
+} from "../shared/calendar.ts";
 import { CATEGORIES, CATEGORY_IDS, guessCategory, parseQuickAdd } from "../shared/categories.ts";
 import type {
   Bootstrap,
   Household,
   Item,
   List,
+  Note,
   PublicUser,
+  Reminder,
   Suggestion,
 } from "../shared/types.ts";
 import { ApiError, api } from "./api.ts";
-import { detectLang, t, tCategory, tError, type Lang, type MsgKey } from "./i18n.ts";
-
-const I18n = createContext<{
-  lang: Lang;
-  setLang: (lang: Lang) => void;
-}>({ lang: "en", setLang: () => {} });
-
-function useT() {
-  const { lang, setLang } = useContext(I18n);
-  return {
-    lang,
-    setLang,
-    t: (key: MsgKey, vars?: Record<string, string | number>) => t(lang, key, vars),
-    err: (message: string) => tError(lang, message),
-    tCat: (id: string) => tCategory(lang, id),
-  };
-}
+import { I18n, detectLang, t, useT, type Lang, type MsgKey } from "./i18n.ts";
+import { NotesSection } from "./Notes.tsx";
+import { downloadIcs, loadSeenReminders, markReminderSeen, requestNotifyPermission, showAppNotification } from "./notify.ts";
 
 type Theme = "system" | "light" | "dark";
 type AuthTab = "login" | "create" | "join";
@@ -48,6 +46,23 @@ function initials(name: string): string {
     .slice(0, 2)
     .map((p) => p[0]?.toUpperCase() ?? "")
     .join("");
+}
+
+function formatDue(ms: number, lang: Lang): string {
+  return new Date(ms).toLocaleString(lang === "ja" ? "ja-JP" : "en-GB", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function upcomingTrips(reminders: Reminder[]): Reminder[] {
+  const cutoff = Date.now() - 30 * 60_000;
+  return reminders
+    .filter((r) => r.kind === "trip" && r.dueAt > cutoff)
+    .sort((a, b) => a.dueAt - b.dueAt);
 }
 
 function useToast() {
@@ -80,9 +95,12 @@ export function App() {
   const [household, setHousehold] = useState<Household | null>(null);
   const [lists, setLists] = useState<List[]>([]);
   const [items, setItems] = useState<Item[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
   const [activeListId, setActiveListId] = useState<string | null>(null);
   const [online, setOnline] = useState<string[]>([]);
   const { toast, show } = useToast();
+  const seenReminders = useRef<Set<string>>(loadSeenReminders());
 
   useEffect(() => {
     applyTheme(theme);
@@ -111,6 +129,8 @@ export function App() {
     setHousehold(data.household);
     setLists(data.lists);
     setItems(data.items);
+    setReminders(data.reminders ?? []);
+    setNotes(data.notes ?? []);
     setActiveListId((current) => {
       if (current && data.lists.some((l) => l.id === current)) return current;
       return data.lists[0]?.id ?? null;
@@ -135,6 +155,55 @@ export function App() {
     };
   }, [user, load]);
 
+  useEffect(() => {
+    if (!user) return;
+    const next = reminders
+      .filter((r) => r.kind === "trip" && r.dueAt > Date.now())
+      .sort((a, b) => a.dueAt - b.dueAt)[0];
+    if (!next) return;
+    const delay = Math.min(Math.max(next.dueAt - Date.now() + 80, 0), 2_147_000_000);
+    const id = window.setTimeout(() => {
+      void load();
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [reminders, user, load]);
+
+  useEffect(() => {
+    if (!user) return;
+    const seen = seenReminders.current;
+    const now = Date.now();
+    for (const reminder of reminders) {
+      if (seen.has(reminder.id)) continue;
+      const list = lists.find((l) => l.id === reminder.listId);
+      const listLabel = list ? `${list.emoji} ${list.name}` : reminder.title;
+      const count = items.filter((i) => (!reminder.listId || i.listId === reminder.listId) && !i.checked).length;
+      if (reminder.kind === "nudge") {
+        if (reminder.createdBy.id === user.id) {
+          seen.add(reminder.id);
+          markReminderSeen(reminder.id);
+          continue;
+        }
+        if (now - reminder.createdAt > 15 * 60_000) continue;
+        seen.add(reminder.id);
+        markReminderSeen(reminder.id);
+        const body =
+          count > 0
+            ? t(lang, "nudgeBody", { name: reminder.createdBy.displayName, list: listLabel, count })
+            : t(lang, "nudgeBodyEmpty", { name: reminder.createdBy.displayName, list: listLabel });
+        void showAppNotification("Basket", body, reminder.id);
+        show(body);
+        continue;
+      }
+      if (now < reminder.dueAt) continue;
+      seen.add(reminder.id);
+      markReminderSeen(reminder.id);
+      const title = t(lang, "tripNotifyTitle");
+      const body = t(lang, "tripNotifyBody", { list: listLabel, count });
+      void showAppNotification(title, body, reminder.id);
+      show(body);
+    }
+  }, [reminders, user, items, lists, lang, show]);
+
   const inner = (() => {
   if (loading) {
     return (
@@ -158,12 +227,14 @@ export function App() {
   const activeList = lists.find((l) => l.id === activeListId) ?? lists[0];
 
   return (
-    <div className="phone">
+    <div className="phone authed">
       <Home
         user={user}
         household={household}
         lists={lists}
         items={items}
+        reminders={reminders}
+        notes={notes}
         online={online}
         activeList={activeList}
         theme={theme}
@@ -174,6 +245,8 @@ export function App() {
           await api.logout();
           setUser(null);
           setHousehold(null);
+          setReminders([]);
+          setNotes([]);
         }}
         onHousehold={(h) => setHousehold(h)}
         onRefresh={load}
@@ -297,6 +370,8 @@ function Home({
   household,
   lists,
   items,
+  reminders,
+  notes,
   online,
   activeList,
   theme,
@@ -311,6 +386,8 @@ function Home({
   household: Household;
   lists: List[];
   items: Item[];
+  reminders: Reminder[];
+  notes: Note[];
   online: string[];
   activeList?: List;
   theme: Theme;
@@ -321,12 +398,20 @@ function Home({
   onHousehold: (h: Household) => void;
   onRefresh: () => Promise<void>;
 }) {
-  const { t, err } = useT();
+  const { t, err, lang } = useT();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [remindOpen, setRemindOpen] = useState(false);
   const [newListOpen, setNewListOpen] = useState(false);
   const [editing, setEditing] = useState<Item | null>(null);
+  const [section, setSection] = useState<"shop" | "notes">("shop");
+  const [activeNoteId, setActiveNoteId] = useState<string | null>(notes[0]?.id ?? null);
   const listItems = items.filter((i) => activeList && i.listId === activeList.id);
   const members = household.members.map((m) => ({ ...m, online: online.includes(m.id) }));
+  const trips = upcomingTrips(reminders);
+  const nextTrip = trips[0];
+  const remindBadge =
+    trips.some((r) => r.dueAt > Date.now() - 30 * 60_000) ||
+    reminders.some((r) => r.kind === "nudge" && Date.now() - r.createdAt < 15 * 60_000 && r.createdBy.id !== user.id);
 
   async function removeList(list: List) {
     if (!confirm(t("deleteListConfirm", { name: list.name }))) return;
@@ -342,86 +427,179 @@ function Home({
 
   return (
     <>
-      <header className="topbar">
-        <h1>Basket</h1>
-        <div className="presence">
-          <div className="avatars">
-            {members.map((m) => (
-              <span key={m.id} className="avatar" style={{ background: m.color }} title={m.displayName}>
-                {initials(m.displayName)}
-              </span>
-            ))}
+      <div className="app-frame">
+        <header className="topbar">
+          <h1>Basket</h1>
+          <div className="presence">
+            <div className="avatars">
+              {members.map((m) => (
+                <span key={m.id} className="avatar" style={{ background: m.color }} title={m.displayName}>
+                  {initials(m.displayName)}
+                </span>
+              ))}
+            </div>
+            {members.filter((m) => m.online).length > 1 && <span className="online-dot" title={t("bothHere")} />}
           </div>
-          {members.filter((m) => m.online).length > 1 && <span className="online-dot" title={t("bothHere")} />}
-        </div>
-        <button className="icon-btn" aria-label={t("settings")} onClick={() => setSettingsOpen(true)}>
-          <Gear />
-        </button>
-      </header>
+          <button className="icon-btn" aria-label={t("remind")} onClick={() => setRemindOpen(true)}>
+            <Bell />
+            {remindBadge && <span className="badge-dot" />}
+          </button>
+          <button className="icon-btn" aria-label={t("settings")} onClick={() => setSettingsOpen(true)}>
+            <Gear />
+          </button>
+        </header>
 
-      <nav className="list-tabs">
-        {lists.map((list) => (
+        <nav className="list-tabs">
+          {lists.map((list) => (
+            <button
+              key={list.id}
+              className={`chip ${section === "shop" && activeList?.id === list.id ? "active" : ""}`}
+              onClick={() => {
+                setSection("shop");
+                onSelectList(list.id);
+              }}
+            >
+              {list.emoji} {list.name}
+              {activeList?.id === list.id && (
+                <span
+                  className="chip-x"
+                  role="button"
+                  aria-label={t("deleteList")}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeList(list);
+                  }}
+                >
+                  ×
+                </span>
+              )}
+            </button>
+          ))}
+          <button className="chip add" onClick={() => setNewListOpen(true)}>
+            {t("addList")}
+          </button>
           <button
-            key={list.id}
-            className={`chip ${activeList?.id === list.id ? "active" : ""}`}
-            onClick={() => onSelectList(list.id)}
+            type="button"
+            className={`chip notes-tab ${section === "notes" ? "active" : ""}`}
+            onClick={() => setSection("notes")}
           >
-            {list.emoji} {list.name}
-            {activeList?.id === list.id && (
-              <span
-                className="chip-x"
-                role="button"
-                aria-label={t("deleteList")}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeList(list);
+            📝 {t("notesSection")}
+          </button>
+          <div className="side-notes">
+            <div className="group-label">{t("notesSection")}</div>
+            {notes.map((note) => (
+              <button
+                key={note.id}
+                type="button"
+                className={`chip ${section === "notes" && activeNoteId === note.id ? "active" : ""}`}
+                onClick={() => {
+                  setSection("notes");
+                  setActiveNoteId(note.id);
                 }}
               >
-                ×
-              </span>
-            )}
-          </button>
-        ))}
-        <button className="chip add" onClick={() => setNewListOpen(true)}>
-          {t("addList")}
-        </button>
-      </nav>
+                {note.fileMime === "application/pdf" ? "📄" : note.fileMime?.startsWith("image/") ? "🖼️" : "📝"}{" "}
+                {note.title || t("untitledNote")}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="chip add"
+              onClick={async () => {
+                try {
+                  const note = await api.createNote({ title: t("untitledNote"), body: "" });
+                  setSection("notes");
+                  setActiveNoteId(note.id);
+                  await onRefresh();
+                } catch (error) {
+                  onToast(error instanceof Error ? err(error.message) : t("cannotSave"));
+                }
+              }}
+            >
+              {t("addNote")}
+            </button>
+          </div>
+          {trips.length > 0 && (
+            <div className="side-upcoming">
+              <div className="group-label">{t("upcoming")}</div>
+              {trips.slice(0, 4).map((trip) => (
+                <button key={trip.id} type="button" className="upcoming-row" onClick={() => setRemindOpen(true)}>
+                  <div>
+                    <strong>{trip.title}</strong>
+                    <div className="muted">{formatDue(trip.dueAt, lang)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </nav>
 
-      {activeList ? (
-        <ListBody
-          items={listItems}
-          onToggle={async (item) => {
-            try {
-              if (navigator.vibrate) navigator.vibrate(8);
-              await api.updateItem(item.id, { checked: !item.checked });
-              await onRefresh();
-            } catch (error) {
-              onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
-            }
-          }}
-          onEdit={setEditing}
-          onClear={async () => {
-            if (!activeList) return;
-            await api.clearChecked(activeList.id);
-            await onRefresh();
-            onToast(t("checkedCleared"));
-          }}
-        />
-      ) : (
-        <div className="list-body empty">
-          <h2>{t("noLists")}</h2>
-          <p>{t("noListsHint")}</p>
+        <div className="workspace">
+          {section === "notes" ? (
+            <NotesSection
+              notes={notes}
+              activeNoteId={activeNoteId}
+              onSelect={setActiveNoteId}
+              onToast={onToast}
+              onRefresh={onRefresh}
+            />
+          ) : (
+            <>
+              {nextTrip && (
+                <button type="button" className="remind-banner" onClick={() => setRemindOpen(true)}>
+                  <span>{nextTrip.title}</span>
+                  <span className="muted">{formatDue(nextTrip.dueAt, lang)}</span>
+                </button>
+              )}
+              {activeList ? (
+                <ListBody
+                  items={listItems}
+                  onToggle={async (item) => {
+                    try {
+                      if (navigator.vibrate) navigator.vibrate(8);
+                      await api.updateItem(item.id, { checked: !item.checked });
+                      await onRefresh();
+                    } catch (error) {
+                      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                    }
+                  }}
+                  onEdit={setEditing}
+                  onClear={async () => {
+                    if (!activeList) return;
+                    await api.clearChecked(activeList.id);
+                    await onRefresh();
+                    onToast(t("checkedCleared"));
+                  }}
+                />
+              ) : (
+                <div className="list-body empty">
+                  <h2>{t("noLists")}</h2>
+                  <p>{t("noListsHint")}</p>
+                </div>
+              )}
+
+              {activeList && (
+                <AddDock
+                  listId={activeList.id}
+                  onToast={onToast}
+                  onAdded={onRefresh}
+                />
+              )}
+            </>
+          )}
         </div>
-      )}
+      </div>
 
-      {activeList && (
-        <AddDock
-          listId={activeList.id}
+      {remindOpen && (
+        <RemindSheet
+          list={activeList}
+          lists={lists}
+          items={items}
+          reminders={reminders}
+          onClose={() => setRemindOpen(false)}
           onToast={onToast}
-          onAdded={onRefresh}
+          onRefresh={onRefresh}
         />
       )}
-
       {settingsOpen && (
         <SettingsSheet
           household={household}
@@ -965,11 +1143,294 @@ function EditItemSheet({
   );
 }
 
+function RemindSheet({
+  list,
+  lists,
+  items,
+  reminders,
+  onClose,
+  onToast,
+  onRefresh,
+}: {
+  list?: List;
+  lists: List[];
+  items: Item[];
+  reminders: Reminder[];
+  onClose: () => void;
+  onToast: (s: string) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const { t, err, lang } = useT();
+  const [dueLocal, setDueLocal] = useState(() => toLocalInputValue(presetDue("1h")));
+  const [duration, setDuration] = useState(60);
+  const [preset, setPreset] = useState<DuePreset | "custom">("1h");
+  const [notifyState, setNotifyState] = useState<NotificationPermission | "unsupported">(() =>
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+  );
+  const [busy, setBusy] = useState(false);
+
+  const listLabel = list ? `${list.emoji} ${list.name}` : "Basket";
+  const plannerItems = list ? items.filter((i) => i.listId === list.id) : items;
+  const trips = upcomingTrips(reminders);
+  const start = fromLocalInputValue(dueLocal);
+  const shopTitle = t("shopFor", { list: listLabel });
+  const calEvent = Number.isFinite(start)
+    ? {
+        uid: `${start}@basket`,
+        title: shopTitle,
+        description: eventDescription(listLabel, plannerItems),
+        start,
+        end: start + duration * 60_000,
+      }
+    : null;
+
+  async function ensurePerm() {
+    const perm = await requestNotifyPermission();
+    setNotifyState(perm);
+    return perm;
+  }
+
+  const presetLabel: Record<DuePreset, MsgKey> = {
+    "1h": "inOneHour",
+    evening: "thisEvening",
+    tomorrow: "tomorrowMorning",
+    saturday: "saturdayMorning",
+  };
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="handle" />
+        <h2>{t("remind")}</h2>
+        {notifyState === "default" && (
+          <button className="btn ghost block" type="button" onClick={() => void ensurePerm()}>
+            {t("allowNotifications")}
+          </button>
+        )}
+        {notifyState === "granted" && <p className="muted">{t("notificationsOn")}</p>}
+        {notifyState === "denied" && <p className="muted">{t("notificationsBlocked")}</p>}
+        {notifyState === "unsupported" && <p className="muted">{t("notificationsNeeded")}</p>}
+
+        <div className="group-label">{t("nudgeHousehold")}</div>
+        <p className="muted">{t("nudgeHint")}</p>
+        <button
+          className="btn block"
+          type="button"
+          data-action="nudge"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await ensurePerm();
+              await api.createReminder({
+                kind: "nudge",
+                listId: list?.id,
+                title: t("nudgeFor", { list: listLabel }),
+              });
+              await onRefresh();
+              onToast(t("nudgeSent"));
+            } catch (error) {
+              onToast(error instanceof Error ? err(error.message) : t("cannotNudge"));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {t("notifyNow")}
+        </button>
+
+        <div className="group-label">{t("planShop")}</div>
+        <div className="preset-row">
+          {(["1h", "evening", "tomorrow", "saturday"] as DuePreset[]).map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={`btn small ${preset === id ? "" : "ghost"}`}
+              onClick={() => {
+                setPreset(id);
+                setDueLocal(toLocalInputValue(presetDue(id)));
+              }}
+            >
+              {t(presetLabel[id])}
+            </button>
+          ))}
+        </div>
+        <label>
+          {t("customTime")}
+          <input
+            type="datetime-local"
+            value={dueLocal}
+            onChange={(e) => {
+              setPreset("custom");
+              setDueLocal(e.target.value);
+            }}
+          />
+        </label>
+        <div className="group-label">{t("duration")}</div>
+        <div className="theme-row">
+          {[30, 60, 90].map((mins) => (
+            <button
+              key={mins}
+              type="button"
+              className={`btn small ${duration === mins ? "" : "ghost"}`}
+              onClick={() => setDuration(mins)}
+            >
+              {mins === 30 ? t("min30") : mins === 60 ? t("min60") : t("min90")}
+            </button>
+          ))}
+        </div>
+        <div className="sheet-actions">
+          <button
+            className="btn"
+            type="button"
+            data-action="set-reminder"
+            disabled={busy}
+            onClick={async () => {
+              if (!Number.isFinite(start) || start < Date.now() - 60_000) {
+                onToast(t("duePast"));
+                return;
+              }
+              setBusy(true);
+              try {
+                await ensurePerm();
+                await api.createReminder({
+                  kind: "trip",
+                  listId: list?.id,
+                  dueAt: start,
+                  durationMin: duration,
+                  title: shopTitle,
+                });
+                await onRefresh();
+                onToast(t("reminderSet"));
+              } catch (error) {
+                onToast(error instanceof Error ? err(error.message) : t("cannotRemind"));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {t("setReminder")}
+          </button>
+        </div>
+        <div className="group-label">{t("addToCalendar")}</div>
+        <div className="cal-row">
+          <a
+            className="btn ghost small"
+            href={calEvent ? googleCalendarUrl(calEvent) : "#"}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => {
+              if (!calEvent) e.preventDefault();
+            }}
+          >
+            {t("googleCalendar")}
+          </a>
+          <a
+            className="btn ghost small"
+            href={calEvent ? outlookCalendarUrl(calEvent) : "#"}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => {
+              if (!calEvent) e.preventDefault();
+            }}
+          >
+            {t("outlookCalendar")}
+          </a>
+          <button
+            className="btn ghost small"
+            type="button"
+            onClick={() => {
+              if (!calEvent) {
+                onToast(t("duePast"));
+                return;
+              }
+              downloadIcs("basket-shop", buildIcs(calEvent));
+              onToast(t("icsSaved"));
+            }}
+          >
+            {t("downloadIcs")}
+          </button>
+        </div>
+
+        <div className="group-label">{t("upcoming")}</div>
+        {trips.length === 0 && <p className="muted">{t("noReminders")}</p>}
+        <div className="upcoming-list">
+          {trips.map((trip) => (
+            <div className="upcoming-row" key={trip.id}>
+              <div>
+                <strong>{trip.title}</strong>
+                <div className="muted">{formatDue(trip.dueAt, lang)}</div>
+              </div>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={t("downloadIcs")}
+                onClick={() => {
+                  const tripList = lists.find((l) => l.id === trip.listId);
+                  const tripLabel = tripList ? `${tripList.emoji} ${tripList.name}` : trip.title;
+                  const tripItems = trip.listId ? items.filter((i) => i.listId === trip.listId) : items;
+                  downloadIcs(
+                    "basket-shop",
+                    buildIcs({
+                      uid: `${trip.id}@basket`,
+                      title: trip.title,
+                      description: eventDescription(tripLabel, tripItems),
+                      start: trip.dueAt,
+                      end: trip.dueAt + (trip.durationMin || 60) * 60_000,
+                    }),
+                  );
+                  onToast(t("icsSaved"));
+                }}
+              >
+                <CalIcon />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={t("deleteReminder")}
+                onClick={async () => {
+                  try {
+                    await api.deleteReminder(trip.id);
+                    await onRefresh();
+                    onToast(t("reminderRemoved"));
+                  } catch (error) {
+                    onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                  }
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Pencil() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" />
+    </svg>
+  );
+}
+
+function Bell() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}
+
+function CalIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M8 3v4M16 3v4M3 10h18" />
     </svg>
   );
 }

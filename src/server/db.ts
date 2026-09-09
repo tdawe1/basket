@@ -1,4 +1,4 @@
-import type { Household, Item, List, PublicUser, Suggestion } from "../shared/types.ts";
+import type { Household, Item, List, Note, PublicUser, Reminder, Suggestion } from "../shared/types.ts";
 import { formatInvite, SESSION_MS } from "./auth.ts";
 import type { Sql } from "./sql.ts";
 
@@ -258,4 +258,183 @@ export async function nextListSort(sql: Sql, householdId: string): Promise<numbe
 export async function memberCount(sql: Sql, householdId: string): Promise<number> {
   const row = await sql.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE household_id = ?", householdId);
   return Number(row?.n ?? 0);
+}
+
+type ReminderJoin = {
+  id: string;
+  list_id: string | null;
+  kind: string;
+  title: string;
+  due_at: number;
+  duration_min: number;
+  created_at: number;
+  uid: string;
+  display_name: string;
+  username: string;
+  color: string;
+};
+
+export function mapReminder(row: ReminderJoin): Reminder {
+  return {
+    id: row.id,
+    listId: row.list_id,
+    kind: row.kind === "nudge" ? "nudge" : "trip",
+    title: row.title,
+    dueAt: row.due_at,
+    durationMin: row.duration_min,
+    createdBy: {
+      id: row.uid,
+      displayName: row.display_name,
+      username: row.username,
+      color: row.color,
+    },
+    createdAt: row.created_at,
+  };
+}
+
+export async function pruneReminders(sql: Sql, householdId: string, now = Date.now()): Promise<void> {
+  await sql.run(
+    "DELETE FROM reminders WHERE household_id = ? AND kind = 'nudge' AND created_at < ?",
+    householdId,
+    now - 24 * 60 * 60 * 1000,
+  );
+  await sql.run(
+    "DELETE FROM reminders WHERE household_id = ? AND kind = 'trip' AND due_at < ?",
+    householdId,
+    now - 7 * 24 * 60 * 60 * 1000,
+  );
+}
+
+function isMissingRemindersTable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no such table/i.test(msg) && /reminders/i.test(msg);
+}
+
+export async function listReminders(sql: Sql, householdId: string, now = Date.now()): Promise<Reminder[]> {
+  try {
+    await pruneReminders(sql, householdId, now);
+  } catch (err) {
+    if (isMissingRemindersTable(err)) return [];
+    throw err;
+  }
+  try {
+    const rows = await sql.all<ReminderJoin>(
+      `SELECT r.id, r.list_id, r.kind, r.title, r.due_at, r.duration_min, r.created_at,
+              u.id AS uid, u.display_name, u.username, u.color
+       FROM reminders r
+       JOIN users u ON u.id = r.created_by
+       WHERE r.household_id = ?
+         AND (
+           (r.kind = 'nudge' AND r.created_at > ?)
+           OR (r.kind = 'trip' AND r.due_at > ?)
+         )
+       ORDER BY r.due_at ASC
+       LIMIT 50`,
+      householdId,
+      now - 60 * 60 * 1000,
+      now - 12 * 60 * 60 * 1000,
+    );
+    return rows.map(mapReminder);
+  } catch (err) {
+    if (isMissingRemindersTable(err)) return [];
+    throw err;
+  }
+}
+
+export async function getReminderForHousehold(
+  sql: Sql,
+  reminderId: string,
+  householdId: string,
+): Promise<Reminder | undefined> {
+  const row = await sql.get<ReminderJoin>(
+    `SELECT r.id, r.list_id, r.kind, r.title, r.due_at, r.duration_min, r.created_at,
+            u.id AS uid, u.display_name, u.username, u.color
+     FROM reminders r
+     JOIN users u ON u.id = r.created_by
+     WHERE r.id = ? AND r.household_id = ?`,
+    reminderId,
+    householdId,
+  );
+  return row ? mapReminder(row) : undefined;
+}
+
+type NoteJoin = {
+  id: string;
+  title: string;
+  body: string;
+  file_name: string | null;
+  file_mime: string | null;
+  file_size: number | null;
+  created_at: number;
+  updated_at: number;
+  uid: string;
+  display_name: string;
+  username: string;
+  color: string;
+};
+
+export function mapNote(row: NoteJoin): Note {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    fileName: row.file_name,
+    fileMime: row.file_mime,
+    fileSize: row.file_size == null ? null : Number(row.file_size),
+    createdBy: {
+      id: row.uid,
+      displayName: row.display_name,
+      username: row.username,
+      color: row.color,
+    },
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function isMissingNotesTable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no such table/i.test(msg) && /notes/i.test(msg);
+}
+
+const NOTE_SELECT = `
+  SELECT n.id, n.title, n.body, n.file_name, n.file_mime, n.file_size, n.created_at, n.updated_at,
+         u.id AS uid, u.display_name, u.username, u.color
+  FROM notes n
+  JOIN users u ON u.id = n.created_by
+`;
+
+export async function listNotes(sql: Sql, householdId: string): Promise<Note[]> {
+  try {
+    const rows = await sql.all<NoteJoin>(
+      `${NOTE_SELECT}
+       WHERE n.household_id = ?
+       ORDER BY n.updated_at DESC
+       LIMIT 100`,
+      householdId,
+    );
+    return rows.map(mapNote);
+  } catch (err) {
+    if (isMissingNotesTable(err)) return [];
+    throw err;
+  }
+}
+
+export async function getNoteForHousehold(
+  sql: Sql,
+  noteId: string,
+  householdId: string,
+): Promise<Note | undefined> {
+  try {
+    const row = await sql.get<NoteJoin>(
+      `${NOTE_SELECT}
+       WHERE n.id = ? AND n.household_id = ?`,
+      noteId,
+      householdId,
+    );
+    return row ? mapNote(row) : undefined;
+  } catch (err) {
+    if (isMissingNotesTable(err)) return undefined;
+    throw err;
+  }
 }

@@ -60,6 +60,41 @@ CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id, checked, created_at)
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_lists_household ON lists(household_id);
 CREATE INDEX IF NOT EXISTS idx_users_household ON users(household_id);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id TEXT PRIMARY KEY,
+  household_id TEXT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+  list_id TEXT REFERENCES lists(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL DEFAULT 'trip',
+  title TEXT NOT NULL,
+  due_at INTEGER NOT NULL,
+  duration_min INTEGER NOT NULL DEFAULT 60,
+  created_by TEXT NOT NULL REFERENCES users(id),
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_household ON reminders(household_id, due_at);
+
+CREATE TABLE IF NOT EXISTS notes (
+  id TEXT PRIMARY KEY,
+  household_id TEXT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  file_name TEXT,
+  file_mime TEXT,
+  file_size INTEGER,
+  created_by TEXT NOT NULL REFERENCES users(id),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_household ON notes(household_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS note_blobs (
+  id TEXT PRIMARY KEY,
+  mime TEXT NOT NULL,
+  data TEXT NOT NULL
+);
 `;
 
 export async function ensureSchema(sql: Sql): Promise<void> {
