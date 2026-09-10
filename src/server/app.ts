@@ -37,6 +37,24 @@ import {
   type UserRow,
 } from "./db.ts";
 import { MAX_NOTE_FILE_BYTES, safeDownloadName, sniffNoteFile, sqlFiles, type FileStore } from "./files.ts";
+import { genericServerErrorResponse } from "./http-error.ts";
+import {
+  authorizeUrl,
+  codeChallenge,
+  consumePendingState,
+  createPendingState,
+  exchangeCode,
+  fetchProfile,
+  finishOAuthLogin,
+  isProvider,
+  linkOAuthAccount,
+  listOAuthAccounts,
+  oauthCallbackUrl,
+  oauthConfigured,
+  userHasPassword,
+  type OAuthEnv,
+  type OAuthMode,
+} from "./oauth.ts";
 import type { Sql } from "./sql.ts";
 
 export type AppBindings = {
@@ -44,6 +62,13 @@ export type AppBindings = {
   DATABASE_URL?: string;
   DATABASE_AUTH_TOKEN?: string;
   COOKIE_SECURE?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  APPLE_CLIENT_ID?: string;
+  APPLE_TEAM_ID?: string;
+  APPLE_KEY_ID?: string;
+  APPLE_PRIVATE_KEY?: string;
+  OAUTH_REDIRECT_BASE?: string;
 };
 
 type Env = {
@@ -70,6 +95,36 @@ function setSession(c: Context<Env>, sessionId: string) {
   });
 }
 
+function nodeEnv(key: string): string | undefined {
+  const g: unknown = globalThis;
+  if (!g || typeof g !== "object" || !("process" in g)) return undefined;
+  const proc: unknown = g.process;
+  if (!proc || typeof proc !== "object" || !("env" in proc)) return undefined;
+  const env: unknown = proc.env;
+  if (!env || typeof env !== "object") return undefined;
+  // Index into the runtime env bag; the typeof check below validates the read.
+  const table = env as Record<string, unknown>;
+  const value: unknown = table[key];
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function oauthEnv(c: Context<Env>): OAuthEnv {
+  const b = c.env ?? {};
+  return {
+    GOOGLE_CLIENT_ID: str(b.GOOGLE_CLIENT_ID) ?? nodeEnv("GOOGLE_CLIENT_ID"),
+    GOOGLE_CLIENT_SECRET: str(b.GOOGLE_CLIENT_SECRET) ?? nodeEnv("GOOGLE_CLIENT_SECRET"),
+    APPLE_CLIENT_ID: str(b.APPLE_CLIENT_ID) ?? nodeEnv("APPLE_CLIENT_ID"),
+    APPLE_TEAM_ID: str(b.APPLE_TEAM_ID) ?? nodeEnv("APPLE_TEAM_ID"),
+    APPLE_KEY_ID: str(b.APPLE_KEY_ID) ?? nodeEnv("APPLE_KEY_ID"),
+    APPLE_PRIVATE_KEY: str(b.APPLE_PRIVATE_KEY) ?? nodeEnv("APPLE_PRIVATE_KEY"),
+    OAUTH_REDIRECT_BASE: str(b.OAUTH_REDIRECT_BASE) ?? nodeEnv("OAUTH_REDIRECT_BASE"),
+  };
+}
+
 async function currentUser(c: Context<Env>): Promise<UserRow | null> {
   const sid = getCookie(c, COOKIE);
   if (!sid) return null;
@@ -86,11 +141,19 @@ function isUser(value: UserRow | Response): value is UserRow {
   return !(value instanceof Response);
 }
 
+function fileTooLarge(cap: number): string {
+  if (cap >= 1024 * 1024) return `File is too large (max ${Math.round(cap / (1024 * 1024))} MB).`;
+  return `File is too large (max ${Math.round(cap / 1024)} KB).`;
+}
+
 export function createApp(
   getSql: (c: Context<Env>) => Sql | Promise<Sql>,
   getFiles?: (c: Context<Env>) => FileStore | Promise<FileStore>,
 ) {
   const app = new Hono<Env>();
+  // No stack traces or framework-default HTML ever reach clients (Node/Vercel
+  // have no other catch-all; the Worker wraps fetch separately).
+  app.onError(() => genericServerErrorResponse());
 
   app.get("/api/health", (c) => c.json({ ok: true }));
 
@@ -196,18 +259,24 @@ export function createApp(
     const userId = newId();
     const now = Date.now();
     const sessionId = newId() + newId();
-    await sql.run(
-      `INSERT INTO users (id, household_id, username, password_hash, display_name, color, created_at, last_seen)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      userId,
-      household.id,
-      username,
-      await hashPassword(password),
-      displayName,
-      USER_COLORS[count % USER_COLORS.length],
-      now,
-      now,
-    );
+    // Check-then-insert races under concurrent joins with the same username;
+    // the loser hits UNIQUE. Report it as taken instead of a 500.
+    try {
+      await sql.run(
+        `INSERT INTO users (id, household_id, username, password_hash, display_name, color, created_at, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        userId,
+        household.id,
+        username,
+        await hashPassword(password),
+        displayName,
+        USER_COLORS[count % USER_COLORS.length],
+        now,
+        now,
+      );
+    } catch {
+      return c.json({ error: "That username is taken." }, 409);
+    }
     await createSession(sql, userId, sessionId);
     setSession(c, sessionId);
     return c.json({ ok: true });
@@ -239,6 +308,113 @@ export function createApp(
     if (sid) await sql.run("DELETE FROM sessions WHERE id = ?", sid);
     deleteCookie(c, COOKIE, { path: "/", secure: cookieSecure(c) });
     return c.json({ ok: true });
+  });
+
+  app.get("/api/auth/oauth/providers", (c) => {
+    const env = oauthEnv(c);
+    return c.json({ google: oauthConfigured(env, "google"), apple: oauthConfigured(env, "apple") });
+  });
+
+  app.post("/api/auth/oauth/start", async (c) => {
+    const sql = c.get("sql");
+    const env = oauthEnv(c);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const provider = body.provider;
+    const mode = body.mode as OAuthMode;
+    if (!isProvider(provider) || !oauthConfigured(env, provider)) {
+      return c.json({ error: "That login is not set up." }, 400);
+    }
+    if (mode !== "login" && mode !== "create" && mode !== "join" && mode !== "link") {
+      return c.json({ error: "Pick a sign-in option." }, 400);
+    }
+    let userId: string | undefined;
+    if (mode === "link") {
+      const user = await requireUser(c);
+      if (!isUser(user)) return user;
+      userId = user.id;
+    }
+    const params: Record<string, string> = {};
+    if (mode === "create") {
+      const householdName = clip(body.householdName, 60);
+      const displayName = clip(body.displayName, 40);
+      if (!householdName) return c.json({ error: "Give your household a name." }, 400);
+      const nameErr = validateDisplayName(displayName);
+      if (nameErr) return c.json({ error: nameErr }, 400);
+      params.householdName = householdName;
+      params.displayName = displayName;
+    }
+    if (mode === "join") {
+      const inviteCode = clip(body.inviteCode, 20);
+      const displayName = clip(body.displayName, 40);
+      const nameErr = validateDisplayName(displayName);
+      if (nameErr) return c.json({ error: nameErr }, 400);
+      if (!(await getHouseholdByInvite(sql, inviteCode))) {
+        return c.json({ error: "That invite code was not found." }, 404);
+      }
+      params.inviteCode = inviteCode;
+      params.displayName = displayName;
+    }
+    const redirectUri = oauthCallbackUrl(env, c.req.url);
+    const pending = await createPendingState(sql, { provider, mode, userId, params });
+    const url = await authorizeUrl(env, provider, {
+      state: pending.state,
+      challenge: await codeChallenge(pending.verifier),
+      redirectUri,
+    });
+    return c.json({ url });
+  });
+
+  app.get("/api/auth/oauth/callback", async (c) => {
+    const sql = c.get("sql");
+    const env = oauthEnv(c);
+    const fail = (code: string) => c.redirect(`/?oauth_error=${encodeURIComponent(code)}`);
+    if (c.req.query("error")) return fail("denied");
+    const code = c.req.query("code");
+    const state = c.req.query("state");
+    if (!code || !state) return fail("invalid");
+    const pending = await consumePendingState(sql, state);
+    if (!pending || !oauthConfigured(env, pending.provider)) return fail("expired");
+    const redirectUri = oauthCallbackUrl(env, c.req.url);
+    let profile;
+    try {
+      const tokens = await exchangeCode(env, pending.provider, { code, verifier: pending.verifier, redirectUri });
+      profile = await fetchProfile(env, pending.provider, tokens);
+    } catch {
+      return fail("failed");
+    }
+    const result = await finishOAuthLogin(sql, pending.provider, profile.sub, profile, {
+      mode: pending.mode,
+      userId: pending.userId,
+      householdName: pending.params.householdName,
+      displayName: pending.params.displayName,
+      inviteCode: pending.params.inviteCode,
+    });
+    if ("error" in result) return fail(result.error);
+    const sessionId = newId() + newId();
+    await createSession(sql, result.userId, sessionId);
+    setSession(c, sessionId);
+    return c.redirect("/");
+  });
+
+  app.get("/api/auth/oauth/links", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    return c.json(await listOAuthAccounts(c.get("sql"), user.id));
+  });
+
+  app.delete("/api/auth/oauth/:provider", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const provider = c.req.param("provider");
+    if (!isProvider(provider)) return c.json({ error: "Unknown login method." }, 400);
+    const sql = c.get("sql");
+    const links = await listOAuthAccounts(sql, user.id);
+    if (!links.some((l) => l.provider === provider)) return c.json({ error: "That login is not linked." }, 404);
+    if (!userHasPassword(user) && links.length < 2) {
+      return c.json({ error: "Link another login method first." }, 400);
+    }
+    await sql.run("DELETE FROM oauth_accounts WHERE provider = ? AND user_id = ?", provider, user.id);
+    return c.body(null, 204);
   });
 
   app.get("/api/bootstrap", async (c) => {
@@ -329,8 +505,10 @@ export function createApp(
     const id = c.req.param("id");
     const existing = await getListForHousehold(sql, id, user.household_id);
     if (!existing) return c.json({ error: "List not found." }, 404);
-    await sql.run("DELETE FROM items WHERE list_id = ?", id);
-    await sql.run("DELETE FROM lists WHERE id = ?", id);
+    await sql.transaction(async () => {
+      await sql.run("DELETE FROM items WHERE list_id = ?", id);
+      await sql.run("DELETE FROM lists WHERE id = ?", id);
+    });
     return c.body(null, 204);
   });
 
@@ -453,7 +631,7 @@ export function createApp(
       if (!Number.isFinite(dueAt)) return c.json({ error: "Pick a time in the future." }, 400);
       if (dueAt < now - 60_000) return c.json({ error: "Pick a time in the future." }, 400);
       if (dueAt > now + 366 * 24 * 60 * 60 * 1000) {
-        return c.json({ error: "Pick a time in the future." }, 400);
+        return c.json({ error: "Pick a time within the next year." }, 400);
       }
       if (!Number.isFinite(durationMin)) durationMin = 60;
       durationMin = Math.min(240, Math.max(15, Math.round(durationMin)));
@@ -566,7 +744,7 @@ export function createApp(
     const cap = files.maxBytes ?? MAX_NOTE_FILE_BYTES;
     const declaredLength = Number(c.req.header("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > cap) {
-      return c.json({ error: "File is too large (max 8 MB)." }, 413);
+      return c.json({ error: fileTooLarge(cap) }, 413);
     }
     let bytes: Uint8Array;
     let filename = clip(c.req.header("x-file-name"), 120) || "attachment";
@@ -582,14 +760,13 @@ export function createApp(
       bytes = new Uint8Array(await c.req.arrayBuffer());
     }
     if (!bytes.byteLength) return c.json({ error: "Attach a PDF or image." }, 400);
-    if (bytes.byteLength > cap) return c.json({ error: "File is too large (max 8 MB)." }, 413);
+    if (bytes.byteLength > cap) return c.json({ error: fileTooLarge(cap) }, 413);
     const mime = sniffNoteFile(bytes, declared, filename);
     if (!mime) return c.json({ error: "That file type is not allowed." }, 400);
-
     try {
       await files.put(id, { bytes, mime });
     } catch {
-      return c.json({ error: "File is too large (max 8 MB)." }, 413);
+      return c.json({ error: fileTooLarge(cap) }, 413);
     }
     const storedName = safeDownloadName(filename, mime);
     await sql.run(
@@ -622,6 +799,7 @@ export function createApp(
         "content-length": String(payload.byteLength),
         "content-disposition": `${inline ? "inline" : "attachment"}; filename="${name.replace(/"/g, "")}"`,
         "cache-control": "private, max-age=60",
+        "x-content-type-options": "nosniff",
       },
     });
   });
@@ -651,8 +829,11 @@ export function createApp(
     if (!(await getListForHousehold(sql, id, user.household_id))) {
       return c.json({ error: "List not found." }, 404);
     }
-    const rows = await sql.all<{ id: string }>("SELECT id FROM items WHERE list_id = ? AND checked = 1", id);
-    await sql.run("DELETE FROM items WHERE list_id = ? AND checked = 1", id);
+    const rows = await sql.transaction(async () => {
+      const found = await sql.all<{ id: string }>("SELECT id FROM items WHERE list_id = ? AND checked = 1", id);
+      await sql.run("DELETE FROM items WHERE list_id = ? AND checked = 1", id);
+      return found;
+    });
     return c.json({ removed: rows.length });
   });
 

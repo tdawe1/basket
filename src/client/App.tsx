@@ -93,9 +93,10 @@ export function App() {
     document.documentElement.lang = lang === "ja" ? "ja" : "en";
   }, [lang]);
 
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem("basket-theme") as Theme) || "system",
-  );
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = localStorage.getItem("basket-theme");
+    return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+  });
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<PublicUser | null>(null);
   const [household, setHousehold] = useState<Household | null>(null);
@@ -286,8 +287,18 @@ export function App() {
 function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
   const { t, err, setLang, lang } = useT();
   const [tab, setTab] = useState<AuthTab>("create");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => {
+    const code = new URLSearchParams(window.location.search).get("oauth_error");
+    if (!code) return null;
+    window.history.replaceState(null, "", window.location.pathname);
+    return code;
+  });
   const [busy, setBusy] = useState(false);
+  const [providers, setProviders] = useState<{ google: boolean; apple: boolean } | null>(null);
+
+  useEffect(() => {
+    api.oauthProviders().then(setProviders).catch(() => setProviders(null));
+  }, []);
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -316,9 +327,28 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
         });
       }
       await onAuthed();
-    } catch (error) {
-      setError(error instanceof Error ? err(error.message) : t("continueError"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("continueError"));
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startOAuth(provider: "google" | "apple", form: HTMLFormElement | null) {
+    const data = new FormData(form ?? undefined);
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await api.oauthStart({
+        provider,
+        mode: tab === "login" ? "login" : tab === "create" ? "create" : "join",
+        householdName: String(data.get("householdName") ?? ""),
+        displayName: String(data.get("displayName") ?? ""),
+        inviteCode: String(data.get("inviteCode") ?? ""),
+      });
+      window.location.href = res.url;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("continueError"));
       setBusy(false);
     }
   }
@@ -372,10 +402,34 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
             <input name="password" type="password" autoComplete={tab === "login" ? "current-password" : "new-password"} required />
           </label>
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error">{err(error)}</div>}
         <button className="btn block" disabled={busy}>
           {busy ? t("oneMoment") : tab === "login" ? t("signIn") : tab === "join" ? t("joinHousehold") : t("createHousehold")}
         </button>
+        {providers && (providers.google || providers.apple) && (
+          <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+            {providers.google && (
+              <button
+                type="button"
+                className="btn ghost block"
+                disabled={busy}
+                onClick={(e) => startOAuth("google", e.currentTarget.form)}
+              >
+                {t("oauthGoogle")}
+              </button>
+            )}
+            {providers.apple && (
+              <button
+                type="button"
+                className="btn ghost block"
+                disabled={busy}
+                onClick={(e) => startOAuth("apple", e.currentTarget.form)}
+              >
+                {t("oauthApple")}
+              </button>
+            )}
+          </div>
+        )}
         <div className="lang-row" style={{ marginTop: 12, marginBottom: 0 }}>
           <button type="button" className={`btn small ${lang === "en" ? "" : "ghost"}`} onClick={() => setLang("en")}>
             {t("english")}
@@ -954,9 +1008,34 @@ function SettingsSheet({
   onRefresh: () => Promise<void>;
   onDeleteList: (list: List) => Promise<void>;
 }) {
-  const { t, setLang, lang } = useT();
+  const { t, err, setLang, lang } = useT();
   const [name, setName] = useState(household.name);
   const [listName, setListName] = useState(activeList?.name ?? "");
+  const [links, setLinks] = useState<Array<{ provider: string; email: string }>>([]);
+  const [providers, setProviders] = useState<{ google: boolean; apple: boolean } | null>(null);
+
+  useEffect(() => {
+    api.oauthLinks().then(setLinks).catch(() => undefined);
+    api.oauthProviders().then(setProviders).catch(() => setProviders(null));
+  }, []);
+
+  async function linkLogin(provider: "google" | "apple") {
+    try {
+      const res = await api.oauthStart({ provider, mode: "link" });
+      window.location.href = res.url;
+    } catch (error) {
+      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+    }
+  }
+
+  async function unlinkLogin(provider: string) {
+    try {
+      await api.oauthUnlink(provider);
+      setLinks((cur) => cur.filter((l) => l.provider !== provider));
+    } catch (error) {
+      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+    }
+  }
 
   useEffect(() => {
     setName(household.name);
@@ -977,8 +1056,12 @@ function SettingsSheet({
             onChange={(e) => setName(e.target.value)}
             onBlur={async () => {
               if (name.trim() && name.trim() !== household.name) {
-                const h = await api.renameHousehold(name.trim());
-                onHousehold({ ...household, ...h });
+                try {
+                  const h = await api.renameHousehold(name.trim());
+                  onHousehold({ ...household, ...h });
+                } catch {
+                  onToast(t("cannotUpdate"));
+                }
               }
             }}
           />
@@ -991,8 +1074,12 @@ function SettingsSheet({
           <button
             className="btn small"
             onClick={async () => {
-              await navigator.clipboard.writeText(household.inviteCode);
-              onToast(t("copied"));
+              try {
+                await navigator.clipboard.writeText(household.inviteCode);
+                onToast(t("copied"));
+              } catch {
+                onToast(t("copyFailed"));
+              }
             }}
           >
             {t("copy")}
@@ -1003,9 +1090,13 @@ function SettingsSheet({
             className="btn ghost"
             onClick={async () => {
               if (!confirm(t("newCodeConfirm"))) return;
-              const res = await api.rotateInvite();
-              onHousehold({ ...household, inviteCode: res.inviteCode });
-              onToast(t("newCodeReady"));
+              try {
+                const res = await api.rotateInvite();
+                onHousehold({ ...household, inviteCode: res.inviteCode });
+                onToast(t("newCodeReady"));
+              } catch {
+                onToast(t("cannotUpdate"));
+              }
             }}
           >
             {t("newCode")}
@@ -1036,17 +1127,49 @@ function SettingsSheet({
               <input
                 value={listName}
                 onChange={(e) => setListName(e.target.value)}
-                onBlur={async () => {
-                  if (listName.trim() && listName.trim() !== activeList.name) {
+              onBlur={async () => {
+                if (listName.trim() && listName.trim() !== activeList.name) {
+                  try {
                     await api.updateList(activeList.id, { name: listName.trim() });
                     await onRefresh();
+                  } catch {
+                    onToast(t("cannotUpdate"));
                   }
-                }}
+                }
+              }}
               />
             </label>
             <button className="btn danger block" onClick={() => onDeleteList(activeList)}>
               {t("deleteList")}
             </button>
+          </>
+        )}
+        {providers && (providers.google || providers.apple) && (
+          <>
+            <div className="group-label">{t("logins")}</div>
+            <div className="members">
+              {links.map((l) => (
+                <div className="member" key={l.provider}>
+                  <div>
+                    <strong>{l.provider === "google" ? "Google" : "Apple"}</strong>
+                    {l.email && <div className="muted">{l.email}</div>}
+                  </div>
+                  <button className="btn small ghost" onClick={() => unlinkLogin(l.provider)}>
+                    {t("unlink")}
+                  </button>
+                </div>
+              ))}
+              {providers.google && !links.some((l) => l.provider === "google") && (
+                <button className="btn ghost block" onClick={() => linkLogin("google")}>
+                  {t("oauthGoogle")}
+                </button>
+              )}
+              {providers.apple && !links.some((l) => l.provider === "apple") && (
+                <button className="btn ghost block" onClick={() => linkLogin("apple")}>
+                  {t("oauthApple")}
+                </button>
+              )}
+            </div>
           </>
         )}
         <div className="group-label">{t("language")}</div>
@@ -1175,9 +1298,14 @@ function EditItemSheet({
           <button
             className="btn danger"
             onClick={async () => {
-              await api.deleteItem(item.id);
-              await onRefresh();
-              onClose();
+              if (!confirm(t("removeItemConfirm", { name: item.name }))) return;
+              try {
+                await api.deleteItem(item.id);
+                await onRefresh();
+                onClose();
+              } catch (error) {
+                onToast(error instanceof Error ? err(error.message) : t("cannotSave"));
+              }
             }}
           >
             {t("remove")}

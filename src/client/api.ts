@@ -39,6 +39,16 @@ export const api = {
   login: (body: { username: string; password: string }) =>
     request("/api/auth/login", { method: "POST", json: body }),
   logout: () => request("/api/auth/logout", { method: "POST", json: {} }),
+  oauthProviders: () => request<{ google: boolean; apple: boolean }>("/api/auth/oauth/providers"),
+  oauthStart: (body: {
+    provider: string;
+    mode: string;
+    householdName?: string;
+    displayName?: string;
+    inviteCode?: string;
+  }) => request<{ url: string }>("/api/auth/oauth/start", { method: "POST", json: body }),
+  oauthLinks: () => request<Array<{ provider: string; email: string }>>("/api/auth/oauth/links"),
+  oauthUnlink: (provider: string) => request(`/api/auth/oauth/${provider}`, { method: "DELETE" }),
   renameHousehold: (name: string) =>
     request<Household>("/api/household", { method: "PATCH", json: { name } }),
   rotateInvite: () =>

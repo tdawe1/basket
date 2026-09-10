@@ -48,6 +48,22 @@ Environment variables:
 
 If you’d rather not add Turso, use Cloudflare instead. Same app, D1 is included.
 
+## OAuth logins (optional)
+
+Password auth works out of the box. To offer Google/Apple buttons, set:
+
+| Name | Purpose |
+| --- | --- |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (redirect URI `<origin>/api/auth/oauth/callback`) |
+| `APPLE_CLIENT_ID` / `APPLE_TEAM_ID` / `APPLE_KEY_ID` / `APPLE_PRIVATE_KEY` | Apple Services ID, Team ID, Key ID, private key |
+| `OAUTH_REDIRECT_BASE` | Optional callback base; defaults to the request origin |
+
+On Cloudflare/Vercel, set these as environment variables/secrets instead of
+a `.env` file. First-time OAuth users pick Start (new household) or Join
+(invite code); returning users use Sign in. Existing members can link/unlink
+providers in Settings → Logins. An OAuth-only account cannot unlink its last
+login method.
+
 ## First time in the app
 
 1. One of you taps **Start**, names the household, picks a username + password.
@@ -86,5 +102,23 @@ Optional HTTPS reverse proxy: see `Caddyfile`. Set `COOKIE_SECURE=true` once you
 ## Backup
 
 - Node: copy `data/basket.sqlite`
-- Docker: `docker compose cp basket:/data ./basket-backup`
+- Docker: `docker cp $(docker compose ps -q basket):/data ./basket-backup`
 - Cloudflare: `npx wrangler d1 export basket --remote --output backup.sql`
+
+## Testing
+
+```bash
+npm test          # unit tests (node:test via tsx)
+npm run typecheck # strict TypeScript check
+```
+
+End-to-end (needs a running server and system Chromium):
+
+```bash
+npm run build
+PORT=3456 npm start &  # or any port, then BASE_URL=http://127.0.0.1:3456
+npm run e2e            # screenshots land in e2e-artifacts/
+```
+
+`BASE_URL` overrides the target server (default `http://127.0.0.1:3456`);
+`CHROMIUM_PATH` overrides the Chromium binary (default `/usr/bin/chromium`).

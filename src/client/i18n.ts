@@ -15,6 +15,16 @@ const en = {
   password: "Password",
   createHousehold: "Create household",
   joinHousehold: "Join household",
+  oauthGoogle: "Continue with Google",
+  oauthApple: "Continue with Apple",
+  logins: "Logins",
+  unlink: "Unlink",
+  errOAuthSetup: "That login is not set up.",
+  errOAuthNoAccount: "No account is linked to that login yet.",
+  errOAuthTaken: "That login is already linked to another account.",
+  errOAuthLastLogin: "Link another login method first.",
+  errOAuthInvalid: "That login is no longer valid.",
+  errDueRange: "Pick a time within the next year.",
   oneMoment: "One moment…",
   settings: "Settings",
   bothHere: "Both here",
@@ -37,6 +47,7 @@ const en = {
   inviteHint: "Share this code so your partner can join. They create their own username on the Join tab.",
   copy: "Copy",
   copied: "Invite code copied",
+  copyFailed: "Could not copy",
   newCode: "New code",
   newCodeConfirm: "Make a new invite code? The old one will stop working.",
   newCodeReady: "New invite code ready",
@@ -73,6 +84,7 @@ const en = {
   notesPh: "If they have it",
   aisle: "Aisle",
   remove: "Remove",
+  removeItemConfirm: "Delete “{name}”?",
   save: "Save",
   youSuffix: " (you)",
   continueError: "Could not continue.",
@@ -191,6 +203,16 @@ const ja: Record<keyof typeof en, string> = {
   password: "パスワード",
   createHousehold: "家庭をつくる",
   joinHousehold: "家庭に参加",
+  oauthGoogle: "Googleで続ける",
+  oauthApple: "Appleで続ける",
+  logins: "ログイン方法",
+  unlink: "連携を解除",
+  errOAuthSetup: "そのログイン方法は設定されていません。",
+  errOAuthNoAccount: "そのログインに結びついたアカウントがありません。",
+  errOAuthTaken: "そのログインは別のアカウントに結びついています。",
+  errOAuthLastLogin: "先に別のログイン方法を連携してください。",
+  errOAuthInvalid: "そのログインは無効です。",
+  errDueRange: "1年以内の時間を選んでください。",
   oneMoment: "少々お待ちください…",
   settings: "設定",
   bothHere: "ふたりとも開いています",
@@ -213,6 +235,7 @@ const ja: Record<keyof typeof en, string> = {
   inviteHint: "このコードを相手に渡してください。参加タブで、相手自身のユーザー名を作ります。",
   copy: "コピー",
   copied: "招待コードをコピーしました",
+  copyFailed: "コピーできませんでした",
   newCode: "コードを更新",
   newCodeConfirm: "招待コードを新しくしますか？今のコードは使えなくなります。",
   newCodeReady: "新しい招待コードを発行しました",
@@ -249,6 +272,7 @@ const ja: Record<keyof typeof en, string> = {
   notesPh: "あればこれで",
   aisle: "売り場",
   remove: "削除",
+  removeItemConfirm: "「{name}」を削除しますか？",
   save: "保存",
   youSuffix: "（あなた）",
   continueError: "続けられませんでした。",
@@ -363,6 +387,12 @@ const errorMap: Record<string, MsgKey> = {
   "Give your household a name.": "errHouseholdName",
   "Username must be 3–32 letters, numbers, or underscores.": "errUsername",
   "Password must be at least 8 characters.": "errPassword",
+  "That login is not set up.": "errOAuthSetup",
+  "No account is linked to that login yet.": "errOAuthNoAccount",
+  "That login is already linked to another account.": "errOAuthTaken",
+  "Link another login method first.": "errOAuthLastLogin",
+  "That login is no longer valid.": "errOAuthInvalid",
+  "Pick a time within the next year.": "errDueRange",
   "Password is too long.": "errPasswordLong",
   "Name is required.": "errNameRequired",
   "Name is too long.": "errNameLong",
@@ -400,6 +430,12 @@ export function useT() {
     tCat: (id: string) => tCategory(lang, id),
   };
 }
+export function tError(lang: Lang, message: string): string {
+  // The server fills in the enforced cap, so match the prefix, not the size.
+  if (message.startsWith("File is too large")) return t(lang, "errFileLarge");
+  const key = errorMap[message];
+  return key ? t(lang, key) : message;
+}
 
 export function detectLang(): Lang {
   try {
@@ -420,10 +456,6 @@ export function t(lang: Lang, key: MsgKey, vars?: Record<string, string | number
   return s;
 }
 
-export function tError(lang: Lang, message: string): string {
-  const key = errorMap[message];
-  return key ? t(lang, key) : message;
-}
 
 const CAT_KEYS: Record<string, MsgKey> = {
   "fruit-veg": "cat_fruit_veg",

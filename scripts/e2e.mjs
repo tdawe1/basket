@@ -4,6 +4,16 @@ import puppeteer from "puppeteer-core";
 const BASE = process.env.BASE_URL || "http://127.0.0.1:3456";
 const out = new URL("../e2e-artifacts/", import.meta.url);
 mkdirSync(out, { recursive: true });
+const CHROMIUM = process.env.CHROMIUM_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
+
+try {
+  const health = await fetch(new URL("/api/health", BASE));
+  if (!health.ok) throw new Error(`status ${health.status}`);
+} catch (err) {
+  console.error(`Server not reachable at ${BASE}. Start it first, e.g. PORT=3456 npm start`);
+  throw err;
+}
+
 
 function shot(page, name) {
   return page.screenshot({
@@ -13,12 +23,12 @@ function shot(page, name) {
 }
 
 const browser = await puppeteer.launch({
-  executablePath: "/usr/bin/chromium",
+  executablePath: CHROMIUM,
   headless: true,
   args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
 });
 
-const phone = { viewport: { width: 390, height: 844, isMobile: true, hasTouch: true }, deviceScaleFactor: 2 };
+const phone = { viewport: { width: 390, height: 844, isMobile: true, hasTouch: true, deviceScaleFactor: 2 } };
 
 try {
   const alexCtx = await browser.createBrowserContext();
@@ -87,6 +97,32 @@ try {
   await alex.click(".sheet-backdrop", { offset: { x: 10, y: 10 } });
   await alex.waitForSelector(".cal-row", { hidden: true });
 
+  await alex.click(".notes-tab");
+  await alex.waitForSelector(".notes-index-head .btn");
+  await alex.click(".notes-index-head .btn");
+  await alex.waitForSelector(".note-editor input");
+  const noteTitle = await alex.$(".note-editor input");
+  await noteTitle.click({ clickCount: 3 });
+  await noteTitle.type("School letter");
+  await alex.type(".note-body", "Bring water bottle.");
+  await Promise.all([
+    alex.waitForFunction(() =>
+      [...document.querySelectorAll(".toast")].some((n) => n.textContent.includes("Note saved")),
+    ),
+    alex.click(".note-editor-actions .btn.small:not(.ghost)"),
+  ]);
+  await alex.click(".notes-back");
+  await alex.waitForFunction(() =>
+    [...document.querySelectorAll(".note-card strong")].some((n) => n.textContent.includes("School letter")),
+  );
+  await shot(alex, "09-notes-saved");
+  await alex.evaluate(() => {
+    [...document.querySelectorAll(".list-tabs .chip")].find((c) => (c.textContent || "").includes("Groceries"))?.click();
+  });
+  await alex.waitForFunction(() =>
+    [...document.querySelectorAll(".name")].some((n) => n.textContent === "Bananas"),
+  );
+
   const samCtx = await browser.createBrowserContext();
   await samCtx.overridePermissions(BASE, ["notifications"]);
   const sam = await samCtx.newPage();
@@ -148,6 +184,9 @@ try {
   if (layout.navW < 200 || layout.navW > 360) throw new Error(`desktop sidebar width off: ${layout.navW}`);
   if (layout.navH < 400) throw new Error(`desktop sidebar not tall: ${layout.navH}`);
   await shot(desk, "09-desktop-light");
+  await desk.waitForFunction(() =>
+    [...document.querySelectorAll(".side-notes .chip")].some((n) => (n.textContent || "").includes("School letter")),
+  );
   await desk.click('button[aria-label="Remind"]');
   await desk.waitForSelector(".sheet h2");
   await shot(desk, "11-desktop-remind");

@@ -108,6 +108,10 @@ export async function getUserByUsername(sql: Sql, username: string): Promise<Use
   return sql.get<UserRow>("SELECT * FROM users WHERE username = ? COLLATE NOCASE", username);
 }
 
+export async function getUserById(sql: Sql, id: string): Promise<UserRow | undefined> {
+  return sql.get<UserRow>("SELECT * FROM users WHERE id = ?", id);
+}
+
 export async function getSessionUser(sql: Sql, sessionId: string): Promise<UserRow | undefined> {
   const row = await sql.get<UserRow & { session_id: string; expires_at: number }>(
     `SELECT s.id AS session_id, s.expires_at,

@@ -36,7 +36,7 @@ export function sniffNoteFile(bytes: Uint8Array, declared = "", filename = ""): 
   if (startsWith(bytes, JPEG) || kind.includes("jpeg") || kind.includes("jpg") || name.endsWith(".jpg") || name.endsWith(".jpeg")) {
     return startsWith(bytes, JPEG) ? "image/jpeg" : null;
   }
-  if (
+  const webpMagic =
     bytes.length >= 12 &&
     bytes[0] === 0x52 &&
     bytes[1] === 0x49 &&
@@ -45,9 +45,9 @@ export function sniffNoteFile(bytes: Uint8Array, declared = "", filename = ""): 
     bytes[8] === 0x57 &&
     bytes[9] === 0x45 &&
     bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return "image/webp";
+    bytes[11] === 0x50;
+  if (webpMagic || kind.includes("webp") || name.endsWith(".webp")) {
+    return webpMagic ? "image/webp" : null;
   }
   return null;
 }
