@@ -294,6 +294,8 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
     return code;
   });
   const [busy, setBusy] = useState(false);
+  const [resetMode, setResetMode] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [providers, setProviders] = useState<{ google: boolean; apple: boolean } | null>(null);
 
   useEffect(() => {
@@ -306,7 +308,15 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
     setBusy(true);
     const data = new FormData(e.currentTarget);
     try {
-      if (tab === "login") {
+      if (resetMode) {
+        await api.resetPassword({
+          username: String(data.get("username") ?? ""),
+          token: String(data.get("resetToken") ?? ""),
+          password: String(data.get("password") ?? ""),
+        });
+        setResetMode(false);
+        setNotice(t("resetDone"));
+      } else if (tab === "login") {
         await api.login({
           username: String(data.get("username") ?? ""),
           password: String(data.get("password") ?? ""),
@@ -398,15 +408,50 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
             <input name="username" autoComplete="username" placeholder="alex" required />
           </label>
           <label>
-            {t("password")}
-            <input name="password" type="password" autoComplete={tab === "login" ? "current-password" : "new-password"} required />
+            {resetMode ? t("newPassword") : t("password")}
+            <input name="password" type="password" autoComplete={tab === "login" && !resetMode ? "current-password" : "new-password"} required />
           </label>
         </div>
+        {tab === "login" && !resetMode && (
+          <button
+            type="button"
+            className="btn small ghost"
+            style={{ marginTop: 8 }}
+            onClick={() => {
+              setResetMode(true);
+              setError(null);
+              setNotice(null);
+            }}
+          >
+            {t("forgotPassword")}
+          </button>
+        )}
+        {resetMode && (
+          <>
+            <label>
+              {t("resetCode")}
+              <input name="resetToken" autoComplete="off" required />
+            </label>
+            <p className="muted">{t("resetHint")}</p>
+            <button
+              type="button"
+              className="btn small ghost"
+              style={{ marginTop: 8 }}
+              onClick={() => {
+                setResetMode(false);
+                setError(null);
+              }}
+            >
+              {t("backToSignIn")}
+            </button>
+          </>
+        )}
+        {notice && <div className="muted">{notice}</div>}
         {error && <div className="error">{err(error)}</div>}
         <button className="btn block" disabled={busy}>
-          {busy ? t("oneMoment") : tab === "login" ? t("signIn") : tab === "join" ? t("joinHousehold") : t("createHousehold")}
+          {busy ? t("oneMoment") : resetMode ? t("resetPassword") : tab === "login" ? t("signIn") : tab === "join" ? t("joinHousehold") : t("createHousehold")}
         </button>
-        {providers && (providers.google || providers.apple) && (
+        {!resetMode && providers && (providers.google || providers.apple) && (
           <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
             {providers.google && (
               <button
@@ -1036,6 +1081,28 @@ function SettingsSheet({
       onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
     }
   }
+  const [resetTokens, setResetTokens] = useState<Record<string, string>>({});
+
+  async function issueReset(memberId: string) {
+    try {
+      const res = await api.createResetToken(memberId);
+      setResetTokens((cur) => ({ ...cur, [memberId]: res.token }));
+      onToast(t("resetCodeReady"));
+    } catch (error) {
+      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+    }
+  }
+
+  async function copyReset(memberId: string) {
+    const token = resetTokens[memberId];
+    if (!token) return;
+    try {
+      await navigator.clipboard.writeText(token);
+      onToast(t("copied"));
+    } catch {
+      onToast(t("copyFailed"));
+    }
+  }
 
   useEffect(() => {
     setName(household.name);
@@ -1115,6 +1182,18 @@ function SettingsSheet({
                   {m.id === user.id ? t("you") : ""}
                 </strong>
                 <div className="muted">@{m.username}</div>
+                {resetTokens[m.id] ? (
+                  <div className="muted">
+                    {t("resetCode")}: <code>{resetTokens[m.id]}</code>{" "}
+                    <button className="btn small ghost" onClick={() => copyReset(m.id)}>
+                      {t("copy")}
+                    </button>
+                  </div>
+                ) : (
+                  <button className="btn small ghost" onClick={() => issueReset(m.id)}>
+                    {t("issueReset")}
+                  </button>
+                )}
               </div>
             </div>
           ))}

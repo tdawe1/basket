@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n server,web -c green,cyan \"tsx watch src/server/index.ts\" \"vite\"",
     "build": "vite build",
     "start": "NODE_ENV=production tsx src/server/index.ts",
-    "test": "tsx --test src/server/api.test.ts src/server/files.test.ts src/shared/calendar.test.ts src/server/oauth.test.ts",
+    "test": "tsx --test src/server/api.test.ts src/server/files.test.ts src/shared/calendar.test.ts src/server/oauth.test.ts src/server/reset.test.ts",
     "typecheck": "tsc --noEmit",
     "e2e": "node scripts/e2e.mjs",
     "cf:dev": "npm run build && wrangler dev",

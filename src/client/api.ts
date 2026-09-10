@@ -49,6 +49,10 @@ export const api = {
   }) => request<{ url: string }>("/api/auth/oauth/start", { method: "POST", json: body }),
   oauthLinks: () => request<Array<{ provider: string; email: string }>>("/api/auth/oauth/links"),
   oauthUnlink: (provider: string) => request(`/api/auth/oauth/${provider}`, { method: "DELETE" }),
+  createResetToken: (memberId: string) =>
+    request<{ token: string }>(`/api/members/${memberId}/reset-token`, { method: "POST", json: {} }),
+  resetPassword: (body: { username: string; token: string; password: string }) =>
+    request("/api/auth/reset", { method: "POST", json: body }),
   renameHousehold: (name: string) =>
     request<Household>("/api/household", { method: "PATCH", json: { name } }),
   rotateInvite: () =>

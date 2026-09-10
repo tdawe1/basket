@@ -25,6 +25,7 @@ import {
   getNoteForHousehold,
   getReminderForHousehold,
   getSessionUser,
+  getUserById,
   getUserByUsername,
   listItems,
   listLists,
@@ -415,6 +416,60 @@ export function createApp(
     }
     await sql.run("DELETE FROM oauth_accounts WHERE provider = ? AND user_id = ?", provider, user.id);
     return c.body(null, 204);
+  });
+
+  // Password recovery without email: a signed-in household member issues a
+  // single-use reset code; the locked-out member redeems it on the login
+  // screen. Codes are 256-bit, expire in 30 minutes, and burn on use.
+  app.post("/api/members/:id/reset-token", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const target = await getUserById(sql, c.req.param("id"));
+    if (!target || target.household_id !== user.household_id) {
+      return c.json({ error: "Member not found." }, 404);
+    }
+    if (!userHasPassword(target)) {
+      return c.json({ error: "That member signs in with Google or Apple." }, 400);
+    }
+    const token = newId() + newId();
+    const now = Date.now();
+    await sql.run(
+      "INSERT INTO password_resets (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+      token,
+      target.id,
+      now + 30 * 60 * 1000,
+      now,
+    );
+    return c.json({ token });
+  });
+
+  app.post("/api/auth/reset", async (c) => {
+    const sql = c.get("sql");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const username = clip(body.username, 32);
+    const token = String(body.token ?? "").trim();
+    const password = String(body.password ?? "");
+    const passErr = validatePassword(password);
+    if (passErr) return c.json({ error: passErr }, 400);
+    const user = await getUserByUsername(sql, username);
+    // One message for bad username, bad token, or expired token alike.
+    const row = user
+      ? await sql.get<{ user_id: string }>(
+          "SELECT user_id FROM password_resets WHERE user_id = ? AND token = ? AND expires_at > ?",
+          user.id,
+          token,
+          Date.now(),
+        )
+      : undefined;
+    if (!user || !row) return c.json({ error: "That reset code is not valid." }, 400);
+    await sql.transaction(async () => {
+      await sql.run("UPDATE users SET password_hash = ? WHERE id = ?", await hashPassword(password), user.id);
+      await sql.run("DELETE FROM password_resets WHERE user_id = ?", user.id);
+      await sql.run("DELETE FROM sessions WHERE user_id = ?", user.id);
+    });
+    clearLoginFailures(username);
+    return c.json({ ok: true });
   });
 
   app.get("/api/bootstrap", async (c) => {
