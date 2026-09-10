@@ -64,9 +64,9 @@ a `.env` file. First-time OAuth users pick Start (new household) or Join
 providers in Settings → Logins. An OAuth-only account cannot unlink its last
 login method.
 
-Locked out? There is no email reset. Ask your household member to open
-Settings → People → “Make reset code” for you, then use it on the Sign in
-tab under “Forgot password?”. Codes are single-use and expire in 30 minutes.
+Locked out? Use one of the recovery codes saved at signup, on the Sign in
+tab under “Forgot password?”. Each code works once; making a new set in
+Settings → Recovery codes burns the old one.
 
 ## First time in the app
 

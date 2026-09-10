@@ -70,6 +70,35 @@ export function formatInvite(code: string): string {
   return raw.length === 8 ? `${raw.slice(0, 4)}-${raw.slice(4)}` : raw;
 }
 
+export function newRecoveryCode(): string {
+  return formatInvite(newInviteCode());
+}
+
+export async function hashRecoveryCode(code: string): Promise<string> {
+  const normalized = code.replace(/[-\s]/g, "").toUpperCase();
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`basket-recovery:${normalized}`),
+  );
+  return toHex(new Uint8Array(digest));
+}
+
+export const RECOVERY_CODE_COUNT = 10;
+
+export async function mintRecoveryCodes(): Promise<{ codes: string[]; hashes: string[] }> {
+  const codes: string[] = [];
+  const seen = new Set<string>();
+  while (codes.length < RECOVERY_CODE_COUNT) {
+    const code = newRecoveryCode();
+    if (seen.has(code)) continue;
+    seen.add(code);
+    codes.push(code);
+  }
+  const hashes: string[] = [];
+  for (const code of codes) hashes.push(await hashRecoveryCode(code));
+  return { codes, hashes };
+}
+
 export function sessionIdFromHeader(cookieHeader: string | undefined): string | undefined {
   if (!cookieHeader) return undefined;
   const match = cookieHeader.match(/(?:^|; )basket=([^;]+)/);

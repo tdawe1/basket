@@ -33,12 +33,16 @@ export const api = {
     displayName: string;
     username: string;
     password: string;
-  }) => request("/api/auth/register", { method: "POST", json: body }),
+  }) => request<{ ok: boolean; recoveryCodes: string[] }>("/api/auth/register", { method: "POST", json: body }),
   join: (body: { inviteCode: string; displayName: string; username: string; password: string }) =>
-    request("/api/auth/join", { method: "POST", json: body }),
+    request<{ ok: boolean; recoveryCodes: string[] }>("/api/auth/join", { method: "POST", json: body }),
   login: (body: { username: string; password: string }) =>
     request("/api/auth/login", { method: "POST", json: body }),
   logout: () => request("/api/auth/logout", { method: "POST", json: {} }),
+  recover: (body: { username: string; code: string; password: string }) =>
+    request<{ ok: boolean; recoveryCodes: string[] }>("/api/auth/recover", { method: "POST", json: body }),
+  regenerateRecoveryCodes: () =>
+    request<{ codes: string[] }>("/api/recovery/codes/regenerate", { method: "POST", json: {} }),
   oauthProviders: () => request<{ google: boolean; apple: boolean }>("/api/auth/oauth/providers"),
   oauthStart: (body: {
     provider: string;
@@ -49,10 +53,6 @@ export const api = {
   }) => request<{ url: string }>("/api/auth/oauth/start", { method: "POST", json: body }),
   oauthLinks: () => request<Array<{ provider: string; email: string }>>("/api/auth/oauth/links"),
   oauthUnlink: (provider: string) => request(`/api/auth/oauth/${provider}`, { method: "DELETE" }),
-  createResetToken: (memberId: string) =>
-    request<{ token: string }>(`/api/members/${memberId}/reset-token`, { method: "POST", json: {} }),
-  resetPassword: (body: { username: string; token: string; password: string }) =>
-    request("/api/auth/reset", { method: "POST", json: body }),
   renameHousehold: (name: string) =>
     request<Household>("/api/household", { method: "PATCH", json: { name } }),
   rotateInvite: () =>

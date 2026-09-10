@@ -7,7 +7,9 @@ import {
   SESSION_MS,
   clearLoginFailures,
   hashPassword,
+  hashRecoveryCode,
   loginAllowed,
+  mintRecoveryCodes,
   newId,
   newInviteCode,
   recordLoginFailure,
@@ -25,7 +27,6 @@ import {
   getNoteForHousehold,
   getReminderForHousehold,
   getSessionUser,
-  getUserById,
   getUserByUsername,
   listItems,
   listLists,
@@ -191,6 +192,8 @@ export function createApp(
     const invite = newInviteCode();
     const sessionId = newId() + newId();
     const passwordHash = await hashPassword(password);
+    // Shown once; only hashes are stored.
+    const recovery = await mintRecoveryCodes();
 
     try {
       await sql.transaction(async () => {
@@ -223,16 +226,25 @@ export function createApp(
           now,
         );
         await createSession(sql, userId, sessionId);
+        for (const hash of recovery.hashes) {
+          await sql.run(
+            "INSERT INTO recovery_codes (code_hash, user_id, created_at) VALUES (?, ?, ?)",
+            hash,
+            userId,
+            now,
+          );
+        }
       });
     } catch {
       await sql.run("DELETE FROM sessions WHERE id = ?", sessionId).catch(() => undefined);
+      await sql.run("DELETE FROM recovery_codes WHERE user_id = ?", userId).catch(() => undefined);
       await sql.run("DELETE FROM lists WHERE id = ?", listId).catch(() => undefined);
       await sql.run("DELETE FROM users WHERE id = ?", userId).catch(() => undefined);
       await sql.run("DELETE FROM households WHERE id = ?", householdId).catch(() => undefined);
       return c.json({ error: "Could not create household." }, 500);
     }
     setSession(c, sessionId);
-    return c.json({ ok: true });
+    return c.json({ ok: true, recoveryCodes: recovery.codes });
   });
 
   app.post("/api/auth/join", async (c) => {
@@ -260,6 +272,7 @@ export function createApp(
     const userId = newId();
     const now = Date.now();
     const sessionId = newId() + newId();
+    const recovery = await mintRecoveryCodes();
     // Check-then-insert races under concurrent joins with the same username;
     // the loser hits UNIQUE. Report it as taken instead of a 500.
     try {
@@ -275,12 +288,20 @@ export function createApp(
         now,
         now,
       );
+      for (const hash of recovery.hashes) {
+        await sql.run(
+          "INSERT INTO recovery_codes (code_hash, user_id, created_at) VALUES (?, ?, ?)",
+          hash,
+          userId,
+          now,
+        );
+      }
     } catch {
       return c.json({ error: "That username is taken." }, 409);
     }
     await createSession(sql, userId, sessionId);
     setSession(c, sessionId);
-    return c.json({ ok: true });
+    return c.json({ ok: true, recoveryCodes: recovery.codes });
   });
 
   app.post("/api/auth/login", async (c) => {
@@ -418,58 +439,71 @@ export function createApp(
     return c.body(null, 204);
   });
 
-  // Password recovery without email: a signed-in household member issues a
-  // single-use reset code; the locked-out member redeems it on the login
-  // screen. Codes are 256-bit, expire in 30 minutes, and burn on use.
-  app.post("/api/members/:id/reset-token", async (c) => {
-    const user = await requireUser(c);
-    if (!isUser(user)) return user;
-    const sql = c.get("sql");
-    const target = await getUserById(sql, c.req.param("id"));
-    if (!target || target.household_id !== user.household_id) {
-      return c.json({ error: "Member not found." }, 404);
-    }
-    if (!userHasPassword(target)) {
-      return c.json({ error: "That member signs in with Google or Apple." }, 400);
-    }
-    const token = newId() + newId();
-    const now = Date.now();
-    await sql.run(
-      "INSERT INTO password_resets (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
-      token,
-      target.id,
-      now + 30 * 60 * 1000,
-      now,
-    );
-    return c.json({ token });
-  });
-
-  app.post("/api/auth/reset", async (c) => {
+  // Password recovery without email: one-time recovery codes shown once at
+  // signup (Settings can regenerate them). Only hashes are stored; redeeming
+  // a code sets a new password, burns the whole set, and kills every session.
+  app.post("/api/auth/recover", async (c) => {
     const sql = c.get("sql");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const username = clip(body.username, 32);
-    const token = String(body.token ?? "").trim();
+    const code = String(body.code ?? "");
     const password = String(body.password ?? "");
+    if (!loginAllowed(username)) {
+      return c.json({ error: "Too many sign-in attempts. Try again later." }, 429);
+    }
     const passErr = validatePassword(password);
     if (passErr) return c.json({ error: passErr }, 400);
     const user = await getUserByUsername(sql, username);
-    // One message for bad username, bad token, or expired token alike.
+    // One message whether the username or the code was wrong.
+    const hash = await hashRecoveryCode(code);
     const row = user
       ? await sql.get<{ user_id: string }>(
-          "SELECT user_id FROM password_resets WHERE user_id = ? AND token = ? AND expires_at > ?",
+          "SELECT user_id FROM recovery_codes WHERE user_id = ? AND code_hash = ?",
           user.id,
-          token,
-          Date.now(),
+          hash,
         )
       : undefined;
-    if (!user || !row) return c.json({ error: "That reset code is not valid." }, 400);
+    if (!user || !row) {
+      recordLoginFailure(username);
+      return c.json({ error: "That recovery code is not valid." }, 400);
+    }
+    const fresh = await mintRecoveryCodes();
+    const now = Date.now();
     await sql.transaction(async () => {
       await sql.run("UPDATE users SET password_hash = ? WHERE id = ?", await hashPassword(password), user.id);
-      await sql.run("DELETE FROM password_resets WHERE user_id = ?", user.id);
+      await sql.run("DELETE FROM recovery_codes WHERE user_id = ?", user.id);
+      for (const h of fresh.hashes) {
+        await sql.run(
+          "INSERT INTO recovery_codes (code_hash, user_id, created_at) VALUES (?, ?, ?)",
+          h,
+          user.id,
+          now,
+        );
+      }
       await sql.run("DELETE FROM sessions WHERE user_id = ?", user.id);
     });
     clearLoginFailures(username);
-    return c.json({ ok: true });
+    return c.json({ ok: true, recoveryCodes: fresh.codes });
+  });
+
+  app.post("/api/recovery/codes/regenerate", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const recovery = await mintRecoveryCodes();
+    const now = Date.now();
+    await sql.transaction(async () => {
+      await sql.run("DELETE FROM recovery_codes WHERE user_id = ?", user.id);
+      for (const hash of recovery.hashes) {
+        await sql.run(
+          "INSERT INTO recovery_codes (code_hash, user_id, created_at) VALUES (?, ?, ?)",
+          hash,
+          user.id,
+          now,
+        );
+      }
+    });
+    return c.json({ codes: recovery.codes });
   });
 
   app.get("/api/bootstrap", async (c) => {

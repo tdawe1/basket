@@ -296,6 +296,7 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [resetMode, setResetMode] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [freshCodes, setFreshCodes] = useState<string[] | null>(null);
   const [providers, setProviders] = useState<{ google: boolean; apple: boolean } | null>(null);
 
   useEffect(() => {
@@ -309,32 +310,42 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
     const data = new FormData(e.currentTarget);
     try {
       if (resetMode) {
-        await api.resetPassword({
+        const res = await api.recover({
           username: String(data.get("username") ?? ""),
-          token: String(data.get("resetToken") ?? ""),
+          code: String(data.get("recoveryCode") ?? ""),
           password: String(data.get("password") ?? ""),
         });
+        setFreshCodes(res.recoveryCodes);
         setResetMode(false);
-        setNotice(t("resetDone"));
-      } else if (tab === "login") {
+        return;
+      }
+      if (tab === "login") {
         await api.login({
           username: String(data.get("username") ?? ""),
           password: String(data.get("password") ?? ""),
         });
       } else if (tab === "create") {
-        await api.register({
+        const res = await api.register({
           householdName: String(data.get("householdName") ?? ""),
           displayName: String(data.get("displayName") ?? ""),
           username: String(data.get("username") ?? ""),
           password: String(data.get("password") ?? ""),
         });
+        if (res.recoveryCodes.length) {
+          setFreshCodes(res.recoveryCodes);
+          return;
+        }
       } else {
-        await api.join({
+        const res = await api.join({
           inviteCode: String(data.get("inviteCode") ?? ""),
           displayName: String(data.get("displayName") ?? ""),
           username: String(data.get("username") ?? ""),
           password: String(data.get("password") ?? ""),
         });
+        if (res.recoveryCodes.length) {
+          setFreshCodes(res.recoveryCodes);
+          return;
+        }
       }
       await onAuthed();
     } catch (e) {
@@ -361,6 +372,46 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
       setError(e instanceof Error ? e.message : t("continueError"));
       setBusy(false);
     }
+  }
+
+  async function copyCodes(codes: string[]) {
+    try {
+      await navigator.clipboard.writeText(codes.join("\n"));
+      setNotice(t("codesCopied"));
+    } catch {
+      setError(t("copyFailed"));
+    }
+  }
+
+  if (freshCodes) {
+    return (
+      <div className="auth">
+        <img className="brand-mark" src="/icon-192.png" alt="" />
+        <h1 className="wordmark">Basket</h1>
+        <p className="lede">{t("lede")}</p>
+        <div className="auth-card">
+          <h2>{t("recoveryCodesTitle")}</h2>
+          <p className="muted">{t("recoveryCodesIntro")}</p>
+          <ul className="codes">
+            {freshCodes.map((code) => (
+              <li key={code}>
+                <code>{code}</code>
+              </li>
+            ))}
+          </ul>
+          {notice && <div className="muted">{notice}</div>}
+          {error && <div className="error">{err(error)}</div>}
+          <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+            <button type="button" className="btn ghost block" onClick={() => copyCodes(freshCodes)}>
+              {t("copyAll")}
+            </button>
+            <button type="button" className="btn block" onClick={() => onAuthed()}>
+              {t("codesSavedContinue")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -429,10 +480,10 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
         {resetMode && (
           <>
             <label>
-              {t("resetCode")}
-              <input name="resetToken" autoComplete="off" required />
+              {t("recoveryCode")}
+              <input name="recoveryCode" autoComplete="off" required />
             </label>
-            <p className="muted">{t("resetHint")}</p>
+            <p className="muted">{t("recoveryHint")}</p>
             <button
               type="button"
               className="btn small ghost"
@@ -1081,24 +1132,22 @@ function SettingsSheet({
       onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
     }
   }
-  const [resetTokens, setResetTokens] = useState<Record<string, string>>({});
+  const [newCodes, setNewCodes] = useState<string[] | null>(null);
 
-  async function issueReset(memberId: string) {
+  async function regenerateCodes() {
     try {
-      const res = await api.createResetToken(memberId);
-      setResetTokens((cur) => ({ ...cur, [memberId]: res.token }));
-      onToast(t("resetCodeReady"));
+      const res = await api.regenerateRecoveryCodes();
+      setNewCodes(res.codes);
     } catch (error) {
       onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
     }
   }
 
-  async function copyReset(memberId: string) {
-    const token = resetTokens[memberId];
-    if (!token) return;
+  async function copyNewCodes() {
+    if (!newCodes) return;
     try {
-      await navigator.clipboard.writeText(token);
-      onToast(t("copied"));
+      await navigator.clipboard.writeText(newCodes.join("\n"));
+      onToast(t("codesCopied"));
     } catch {
       onToast(t("copyFailed"));
     }
@@ -1182,18 +1231,6 @@ function SettingsSheet({
                   {m.id === user.id ? t("you") : ""}
                 </strong>
                 <div className="muted">@{m.username}</div>
-                {resetTokens[m.id] ? (
-                  <div className="muted">
-                    {t("resetCode")}: <code>{resetTokens[m.id]}</code>{" "}
-                    <button className="btn small ghost" onClick={() => copyReset(m.id)}>
-                      {t("copy")}
-                    </button>
-                  </div>
-                ) : (
-                  <button className="btn small ghost" onClick={() => issueReset(m.id)}>
-                    {t("issueReset")}
-                  </button>
-                )}
               </div>
             </div>
           ))}
@@ -1250,6 +1287,26 @@ function SettingsSheet({
               )}
             </div>
           </>
+        )}
+        <div className="group-label">{t("recoveryCodesTitle")}</div>
+        <p className="muted">{t("recoveryCodesIntro")}</p>
+        {newCodes ? (
+          <>
+            <ul className="codes">
+              {newCodes.map((code) => (
+                <li key={code}>
+                  <code>{code}</code>
+                </li>
+              ))}
+            </ul>
+            <button className="btn ghost block" onClick={copyNewCodes}>
+              {t("copyAll")}
+            </button>
+          </>
+        ) : (
+          <button className="btn ghost block" onClick={regenerateCodes}>
+            {t("regenerateCodes")}
+          </button>
         )}
         <div className="group-label">{t("language")}</div>
         <div className="lang-row">
