@@ -609,6 +609,15 @@ function Home({
   const remindBadge =
     trips.some((r) => r.dueAt > Date.now() - 30 * 60_000) ||
     reminders.some((r) => r.kind === "nudge" && Date.now() - r.createdAt < 15 * 60_000 && r.createdBy.id !== user.id);
+  const hasMaster = section === "shop" || section === "calendar";
+  const panelOpen = remindOpen || settingsOpen || newListOpen || editing !== null;
+  const tabs = [
+    { id: "shop", icon: "🧺", label: t("tabLists") },
+    { id: "notes", icon: "📝", label: t("notesSection") },
+    { id: "vault", icon: "🔑", label: t("vaultSection") },
+    { id: "calendar", icon: "📅", label: t("calendarSection") },
+    { id: "storage", icon: "☁️", label: t("storageSection") },
+  ] as const;
 
   async function removeList(list: List) {
     if (!confirm(t("deleteListConfirm", { name: list.name }))) return;
@@ -624,7 +633,7 @@ function Home({
 
   return (
     <>
-      <div className="app-frame">
+      <div className={`app-frame${hasMaster ? "" : " no-master"}${panelOpen ? " has-panel" : ""}`}>
         <header className="topbar">
           <h1>Basket</h1>
           <div className="presence">
@@ -645,127 +654,110 @@ function Home({
             <Gear />
           </button>
         </header>
-        <nav className="main-tabs" aria-label="Sections">
-          <button
-            type="button"
-            className={`main-tab${section === "shop" ? " active" : ""}`}
-            onClick={() => setSection("shop")}
-          >
-            🧺 {t("tabLists")}
-          </button>
-          <button
-            type="button"
-            className={`main-tab${section === "notes" ? " active" : ""}`}
-            onClick={() => setSection("notes")}
-          >
-            📝 {t("notesSection")}
-          </button>
-          <button
-            type="button"
-            className={`main-tab${section === "vault" ? " active" : ""}`}
-            onClick={() => setSection("vault")}
-          >
-            🔑 {t("vaultSection")}
-          </button>
-          <button
-            type="button"
-            className={`main-tab${section === "calendar" ? " active" : ""}`}
-            onClick={() => setSection("calendar")}
-          >
-            📅 {t("calendarSection")}
-          </button>
-          <button
-            type="button"
-            className={`main-tab${section === "storage" ? " active" : ""}`}
-            onClick={() => setSection("storage")}
-          >
-            ☁️ {t("storageSection")}
-          </button>
-        </nav>
-
-        <nav className="list-tabs">
-          {lists.map((list) => (
-            <button
-              key={list.id}
-              className={`chip ${section === "shop" && activeList?.id === list.id ? "active" : ""}`}
-              onClick={() => {
-                setSection("shop");
-                onSelectList(list.id);
-              }}
-            >
-              {list.emoji} {list.name}
-              {activeList?.id === list.id && (
-                <span
-                  className="chip-x"
-                  role="button"
-                  aria-label={t("deleteList")}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeList(list);
-                  }}
-                >
-                  ×
-                </span>
-              )}
-            </button>
-          ))}
-          <button className="chip add" onClick={() => setNewListOpen(true)}>
-            {t("addList")}
-          </button>
-          <div className="side-notes">
-            <div className="group-label">{t("notesSection")}</div>
-            {notes.map((note) => (
-              <button
-                key={note.id}
-                type="button"
-                className={`chip ${section === "notes" && activeNoteId === note.id ? "active" : ""}`}
-                onClick={() => {
-                  setSection("notes");
-                  setActiveNoteId(note.id);
-                }}
-              >
-                {note.fileMime === "application/pdf" ? "📄" : note.fileMime?.startsWith("image/") ? "🖼️" : "📝"}{" "}
-                {note.title || t("untitledNote")}
-              </button>
-            ))}
+        <nav className="side" aria-label="Sections">
+          <div className="side-group">
+            <div className="side-label">{t("navWorkspace")}</div>
             <button
               type="button"
-              className="chip add"
-              onClick={async () => {
-                try {
-                  const note = await api.createNote({ title: t("untitledNote"), body: "" });
-                  setSection("notes");
-                  setActiveNoteId(note.id);
-                  await onRefresh();
-                } catch (error) {
-                  onToast(error instanceof Error ? err(error.message) : t("cannotSave"));
-                }
-              }}
+              className={`side-item${section === "shop" ? " active" : ""}`}
+              onClick={() => setSection("shop")}
             >
-              {t("addNote")}
+              <span aria-hidden="true">🧺</span> {t("tabLists")}
             </button>
             <button
               type="button"
-              className={`chip ${section === "vault" ? "active" : ""}`}
+              className={`side-item${section === "notes" ? " active" : ""}`}
+              onClick={() => setSection("notes")}
+            >
+              <span aria-hidden="true">📝</span> {t("notesSection")}
+            </button>
+            <button
+              type="button"
+              className={`side-item${section === "vault" ? " active" : ""}`}
               onClick={() => setSection("vault")}
             >
-              🔑 {t("vaultSection")}
+              <span aria-hidden="true">🔑</span> {t("vaultSection")}
             </button>
           </div>
-          {trips.length > 0 && (
-            <div className="side-upcoming">
-              <div className="group-label">{t("upcoming")}</div>
-              {trips.slice(0, 4).map((trip) => (
-                <button key={trip.id} type="button" className="upcoming-row" onClick={() => setRemindOpen(true)}>
-                  <div>
-                    <strong>{trip.title}</strong>
-                    <div className="muted">{formatDue(trip.dueAt, lang)}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="side-group">
+            <div className="side-label">{t("navPlanning")}</div>
+            <button
+              type="button"
+              className={`side-item${section === "calendar" ? " active" : ""}`}
+              onClick={() => setSection("calendar")}
+            >
+              <span aria-hidden="true">📅</span> {t("calendarSection")}
+            </button>
+          </div>
+          <div className="side-group">
+            <div className="side-label">{t("navSystem")}</div>
+            <button
+              type="button"
+              className={`side-item${section === "storage" ? " active" : ""}`}
+              onClick={() => setSection("storage")}
+            >
+              <span aria-hidden="true">☁️</span> {t("storageSection")}
+            </button>
+          </div>
         </nav>
+
+        {hasMaster && (
+          <div className="master">
+            {section === "shop" ? (
+              <>
+                <div className="master-head">
+                  <h2>{t("tabLists")}</h2>
+                  <button type="button" className="btn small" onClick={() => setNewListOpen(true)}>
+                    {t("addList")}
+                  </button>
+                </div>
+                {lists.map((list) => (
+                  <button
+                    key={list.id}
+                    className={`chip master-row ${activeList?.id === list.id ? "active" : ""}`}
+                    onClick={() => onSelectList(list.id)}
+                  >
+                    {list.emoji} {list.name}
+                    {activeList?.id === list.id && (
+                      <span
+                        className="chip-x"
+                        role="button"
+                        aria-label={t("deleteList")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeList(list);
+                        }}
+                      >
+                        ×
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </>
+            ) : (
+              <>
+                <div className="master-head">
+                  <h2>{t("upcoming")}</h2>
+                  <button type="button" className="btn small" onClick={() => setRemindOpen(true)}>
+                    {t("setReminder")}
+                  </button>
+                </div>
+                {trips.length === 0 ? (
+                  <p className="muted">{t("noReminders")}</p>
+                ) : (
+                  trips.map((trip) => (
+                    <button key={trip.id} type="button" className="upcoming-row" onClick={() => setRemindOpen(true)}>
+                      <div>
+                        <strong>{trip.title}</strong>
+                        <div className="muted">{formatDue(trip.dueAt, lang)}</div>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         <div className="workspace">
           {section === "notes" ? (
@@ -779,11 +771,26 @@ function Home({
           ) : section === "vault" ? (
             <VaultSection onToast={onToast} />
           ) : section === "calendar" ? (
-            <CalendarSection reminders={reminders} />
+            <CalendarSection reminders={reminders} trips={trips} onAgenda={() => setRemindOpen(true)} />
           ) : section === "storage" ? (
             <StorageSection onToast={onToast} />
           ) : (
             <>
+              <div className="list-switch">
+                {lists.map((list) => (
+                  <button
+                    key={list.id}
+                    type="button"
+                    className={`chip${activeList?.id === list.id ? " active" : ""}`}
+                    onClick={() => onSelectList(list.id)}
+                  >
+                    {list.emoji} {list.name}
+                  </button>
+                ))}
+                <button type="button" className="chip add" onClick={() => setNewListOpen(true)}>
+                  {t("addList")}
+                </button>
+              </div>
               {nextTrip && (
                 <button type="button" className="remind-banner" onClick={() => setRemindOpen(true)}>
                   <span>{nextTrip.title}</span>
@@ -888,9 +895,23 @@ function Home({
             </>
           )}
         </div>
-      </div>
-
-      {remindOpen && (
+        <nav className="tabbar" aria-label="Sections">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`tab${section === tab.id ? " active" : ""}`}
+              onClick={() => setSection(tab.id)}
+              aria-label={tab.label}
+            >
+              <span aria-hidden="true">{tab.icon}</span>
+              <small>{tab.label}</small>
+            </button>
+          ))}
+        </nav>
+        {panelOpen && (
+          <div className="panel-area">
+            {remindOpen && (
         <RemindSheet
           list={activeList}
           lists={lists}
@@ -958,7 +979,10 @@ function Home({
           onToast={onToast}
           onRefresh={onRefresh}
         />
-      )}
+            )}
+          </div>
+        )}
+      </div>
     </>
   );
 }

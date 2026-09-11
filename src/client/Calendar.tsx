@@ -30,7 +30,7 @@ function fmtTime(ts: number, lang: string): string {
   });
 }
 
-export function CalendarSection({ reminders }: { reminders: Reminder[] }) {
+export function CalendarSection({ reminders, trips, onAgenda }: { reminders: Reminder[]; trips: Reminder[]; onAgenda: () => void }) {
   const { t, lang } = useT();
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -97,6 +97,21 @@ export function CalendarSection({ reminders }: { reminders: Reminder[] }) {
 
   return (
     <div className="calendar-wrap">
+      {trips.length > 0 && (
+        <div className="cal-upcoming">
+          <div className="group-label">{t("upcoming")}</div>
+          {trips.slice(0, 4).map((trip) => (
+            <button key={trip.id} type="button" className="upcoming-row" onClick={onAgenda}>
+              <div>
+                <strong>{trip.title}</strong>
+                <div className="muted">
+                  {fmtDay(trip.dueAt, lang)} · {fmtTime(trip.dueAt, lang)}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="cal-head">
         <button type="button" className="btn ghost small" onClick={() => {
           const d = new Date(year, month - 1, 1);
