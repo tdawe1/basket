@@ -9,8 +9,8 @@ export type UserRow = {
   password_hash: string;
   display_name: string;
   color: string;
+  email: string;
   created_at: number;
-  last_seen: number;
 };
 
 const ONLINE_MS = 20_000;
@@ -52,12 +52,14 @@ export function toPublicUser(row: {
   display_name: string;
   username: string;
   color: string;
+  email?: string;
 }): PublicUser {
   return {
     id: row.id,
     displayName: row.display_name,
     username: row.username,
     color: row.color,
+    email: row.email ?? "",
   };
 }
 
@@ -117,7 +119,7 @@ export async function getUserById(sql: Sql, id: string): Promise<UserRow | undef
 export async function getSessionUser(sql: Sql, sessionId: string): Promise<UserRow | undefined> {
   const row = await sql.get<UserRow & { session_id: string; expires_at: number }>(
     `SELECT s.id AS session_id, s.expires_at,
-            u.id, u.household_id, u.username, u.password_hash, u.display_name, u.color, u.created_at, u.last_seen
+            u.id, u.household_id, u.username, u.password_hash, u.display_name, u.color, u.email, u.created_at, u.last_seen
      FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.id = ?`,
     sessionId,

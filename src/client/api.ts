@@ -1,4 +1,4 @@
-import type { Bootstrap, Household, Item, List, Note, Reminder, Section, Suggestion, VaultItemDetail, VaultList, VaultStatus } from "../shared/types.ts";
+import type { Bootstrap, Household, Item, List, Note, PublicUser, Reminder, Section, Suggestion, VaultItemDetail, VaultList, VaultStatus } from "../shared/types.ts";
 
 export class ApiError extends Error {
   status: number;
@@ -114,4 +114,19 @@ export const api = {
   vaultStatus: () => request<VaultStatus>("/api/vault/status"),
   vaultItems: () => request<VaultList>("/api/vault/items"),
   vaultItem: (id: string) => request<VaultItemDetail>(`/api/vault/items/${encodeURIComponent(id)}`),
+  updateAccount: (body: { email: string }) =>
+    request<PublicUser>("/api/account", { method: "PATCH", json: body }),
+  testEmail: () => request<{ ok: boolean; to: string }>("/api/account/test-email", { method: "POST", json: {} }),
+  shareEmail: (body: { itemId?: string; listId?: string }) =>
+    request<{ ok: boolean; to: string }>("/api/share/email", { method: "POST", json: body }),
+  storageUsage: () => request<{ files: number; bytes: number }>("/api/storage/usage"),
+  storageFiles: () => request<Array<{ id: string; title: string; mime: string; size: number; updatedAt: number }>>("/api/storage/files"),
+  cloudLinks: () => request<Array<{ provider: string; status: string; accountEmail: string }>>("/api/cloud/links"),
+  cloudConnect: (provider: string, accountEmail = "") =>
+    request<{ provider: string; status: string; accountEmail: string }>("/api/cloud/links", {
+      method: "POST",
+      json: { provider, accountEmail },
+    }),
+  cloudDisconnect: (provider: string) =>
+    request(`/api/cloud/links/${encodeURIComponent(provider)}`, { method: "DELETE" }),
 };

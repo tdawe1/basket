@@ -23,8 +23,18 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL,
   color TEXT NOT NULL,
+  email TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   last_seen INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cloud_links (
+  household_id TEXT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  account_email TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (household_id, provider)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -168,6 +178,11 @@ export async function ensureSchema(sql: Sql): Promise<void> {
   await sql.exec(SCHEMA);
   try {
     await sql.exec("ALTER TABLE users ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    // already present
+  }
+  try {
+    await sql.exec("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''");
   } catch {
     // already present
   }

@@ -3,6 +3,7 @@ export type PublicUser = {
   displayName: string;
   username: string;
   color: string;
+  email?: string;
 };
 
 export type Member = PublicUser & {

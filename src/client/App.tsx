@@ -23,8 +23,10 @@ import type {
 } from "../shared/types.ts";
 import { ApiError, api } from "./api.ts";
 import { I18n, detectLang, t, useT, type Lang, type MsgKey } from "./i18n.ts";
-import { NotesSection } from "./Notes.tsx";
 import { VaultSection } from "./Vault.tsx";
+import { NotesSection } from "./Notes.tsx";
+import { CalendarSection } from "./Calendar.tsx";
+import { StorageSection } from "./Storage.tsx";
 import { downloadIcs, loadSeenReminders, markReminderSeen, requestNotifyPermission, showAppNotification } from "./notify.ts";
 
 const THEMES = ["system", "light", "dark", "ocean", "sunset", "forest"] as const;
@@ -597,7 +599,7 @@ function Home({
   const [remindOpen, setRemindOpen] = useState(false);
   const [newListOpen, setNewListOpen] = useState(false);
   const [editing, setEditing] = useState<Item | null>(null);
-  const [section, setSection] = useState<"shop" | "notes" | "vault">("shop");
+  const [section, setSection] = useState<"shop" | "notes" | "vault" | "calendar" | "storage">("shop");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(notes[0]?.id ?? null);
   const listItems = items.filter((i) => activeList && i.listId === activeList.id);
   const listSections = sections.filter((s) => activeList && s.listId === activeList.id);
@@ -643,6 +645,43 @@ function Home({
             <Gear />
           </button>
         </header>
+        <nav className="main-tabs" aria-label="Sections">
+          <button
+            type="button"
+            className={`main-tab${section === "shop" ? " active" : ""}`}
+            onClick={() => setSection("shop")}
+          >
+            🧺 {t("tabLists")}
+          </button>
+          <button
+            type="button"
+            className={`main-tab${section === "notes" ? " active" : ""}`}
+            onClick={() => setSection("notes")}
+          >
+            📝 {t("notesSection")}
+          </button>
+          <button
+            type="button"
+            className={`main-tab${section === "vault" ? " active" : ""}`}
+            onClick={() => setSection("vault")}
+          >
+            🔑 {t("vaultSection")}
+          </button>
+          <button
+            type="button"
+            className={`main-tab${section === "calendar" ? " active" : ""}`}
+            onClick={() => setSection("calendar")}
+          >
+            📅 {t("calendarSection")}
+          </button>
+          <button
+            type="button"
+            className={`main-tab${section === "storage" ? " active" : ""}`}
+            onClick={() => setSection("storage")}
+          >
+            ☁️ {t("storageSection")}
+          </button>
+        </nav>
 
         <nav className="list-tabs">
           {lists.map((list) => (
@@ -672,20 +711,6 @@ function Home({
           ))}
           <button className="chip add" onClick={() => setNewListOpen(true)}>
             {t("addList")}
-          </button>
-          <button
-            type="button"
-            className={`chip notes-tab ${section === "notes" ? "active" : ""}`}
-            onClick={() => setSection("notes")}
-          >
-            📝 {t("notesSection")}
-          </button>
-          <button
-            type="button"
-            className={`chip notes-tab ${section === "vault" ? "active" : ""}`}
-            onClick={() => setSection("vault")}
-          >
-            🔑 {t("vaultSection")}
           </button>
           <div className="side-notes">
             <div className="group-label">{t("notesSection")}</div>
@@ -753,6 +778,10 @@ function Home({
             />
           ) : section === "vault" ? (
             <VaultSection onToast={onToast} />
+          ) : section === "calendar" ? (
+            <CalendarSection reminders={reminders} />
+          ) : section === "storage" ? (
+            <StorageSection onToast={onToast} />
           ) : (
             <>
               {nextTrip && (
@@ -1162,14 +1191,16 @@ function ItemMenu({
   y,
   onClose,
   onToast,
+  onRemind,
 }: {
   item: Item;
   x: number;
   y: number;
   onClose: () => void;
   onToast: (s: string) => void;
+  onRemind: () => void;
 }) {
-  const { t } = useT();
+  const { t, err } = useT();
   const [calOpen, setCalOpen] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1203,6 +1234,15 @@ function ItemMenu({
     window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     onClose();
   }
+  async function sendServerEmail() {
+    try {
+      const res = await api.shareEmail({ itemId: item.id });
+      onToast(t("sentToEmail", { to: res.to }));
+    } catch (error) {
+      onToast(error instanceof Error ? err(error.message) : t("cannotSend"));
+    }
+    onClose();
+  }
   return (
     <>
       <div
@@ -1216,11 +1256,17 @@ function ItemMenu({
       <div className="item-menu" style={style} role="menu">
         {!calOpen ? (
           <>
+            <button type="button" onClick={() => { onRemind(); onClose(); }}>
+              🔔 {t("setReminder")}
+            </button>
             <button type="button" onClick={() => setCalOpen(true)}>
               📅 {t("addToCalendar")}
             </button>
             <button type="button" onClick={sendEmail}>
               ✉️ {t("emailItem")}
+            </button>
+            <button type="button" onClick={() => void sendServerEmail()}>
+              📨 {t("sendToMyEmail")}
             </button>
           </>
         ) : (
@@ -1308,7 +1354,7 @@ function ItemRow({
         {item.quantity ? <span className="qty">{item.quantity}</span> : <Pencil />}
       </button>
       {menu && (
-        <ItemMenu item={item} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onToast={onToast} />
+        <ItemMenu item={item} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onToast={onToast} onRemind={() => onEdit()} />
       )}
     </div>
   );
@@ -1452,6 +1498,14 @@ function SettingsSheet({
   const [listName, setListName] = useState(activeList?.name ?? "");
   const [links, setLinks] = useState<Array<{ provider: string; email: string }>>([]);
   const [providers, setProviders] = useState<{ google: boolean; apple: boolean } | null>(null);
+  const [email, setEmail] = useState(user.email ?? "");
+  const emailDirty = useRef(false);
+
+  useEffect(() => {
+    // The background refresh replaces the user object every few seconds;
+    // never clobber an in-progress edit.
+    if (!emailDirty.current) setEmail(user.email ?? "");
+  }, [user.email]);
 
   useEffect(() => {
     api.oauthLinks().then(setLinks).catch(() => undefined);
@@ -1467,6 +1521,28 @@ function SettingsSheet({
     }
   }
 
+  async function saveEmail() {
+    const next = email.trim();
+    emailDirty.current = false;
+    if (next === (user.email ?? "")) return;
+    try {
+      await api.updateAccount({ email: next });
+      onToast(t("emailSaved"));
+      await onRefresh();
+    } catch (error) {
+      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+      setEmail(user.email ?? "");
+    }
+  }
+
+  async function sendTestEmail() {
+    try {
+      await api.testEmail();
+      onToast(t("testEmailSent"));
+    } catch (error) {
+      onToast(error instanceof Error ? err(error.message) : t("cannotSend"));
+    }
+  }
   async function unlinkLogin(provider: string) {
     try {
       await api.oauthUnlink(provider);
@@ -1577,6 +1653,25 @@ function SettingsSheet({
               </div>
             </div>
           ))}
+        </div>
+        <div className="group-label">{t("accountEmail")}</div>
+        <label>
+          <input
+            value={email}
+            onChange={(e) => {
+              emailDirty.current = true;
+              setEmail(e.target.value);
+            }}
+            placeholder={t("accountEmailPh")}
+            onBlur={() => void saveEmail()}
+            inputMode="email"
+            maxLength={254}
+          />
+        </label>
+        <div className="sheet-actions">
+          <button type="button" className="btn ghost block" onClick={sendTestEmail}>
+            {t("sendTestEmail")}
+          </button>
         </div>
         {activeList && (
           <>

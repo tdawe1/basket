@@ -29,6 +29,7 @@ import {
   getReminderForHousehold,
   getSectionForHousehold,
   getSessionUser,
+  getUserById,
   getUserByUsername,
   listItems,
   listLists,
@@ -41,6 +42,7 @@ import {
   nextListSort,
   nextSectionSort,
   suggestions,
+  toPublicUser,
   type UserRow,
 } from "./db.ts";
 import { MAX_NOTE_FILE_BYTES, safeDownloadName, sniffNoteFile, sqlFiles, type FileStore } from "./files.ts";
@@ -153,6 +155,31 @@ function nodeEnv(key: string): string | undefined {
   const table = env as Record<string, unknown>;
   const value: unknown = table[key];
   return typeof value === "string" && value ? value : undefined;
+}
+// Node-only account mail: SMTP sockets do not exist on Workers/Vercel, so the
+// mailer module is imported lazily and only on Node. Mail goes to the user's
+// own address (never an arbitrary recipient), which bounds abuse.
+function isNodeRuntime(): boolean {
+  const g = globalThis as { process?: { versions?: { node?: string } } };
+  return !!g.process?.versions?.node;
+}
+async function sendAccountMail(
+  to: string,
+  subject: string,
+  text: string,
+): Promise<{ ok: true } | { error: string; status: number }> {
+  if (!isNodeRuntime()) return { error: "Email sending needs the Node server.", status: 503 };
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  const { mailConfig, sendMail } = await import("./mail.ts");
+  const cfg = mailConfig(proc?.env ?? {});
+  if (!cfg) return { error: "Email sending is not configured.", status: 503 };
+  try {
+    await sendMail(cfg, { to, subject, text });
+    return { ok: true };
+  } catch (error) {
+    console.error("sendAccountMail failed:", error instanceof Error ? error.message : error);
+    return { error: "The email could not be sent.", status: 502 };
+  }
 }
 
 function str(value: unknown): string | undefined {
@@ -595,6 +622,7 @@ export function createApp(
         displayName: user.display_name,
         username: user.username,
         color: user.color,
+        email: user.email ?? "",
       },
       household,
       lists: await listLists(sql, user.household_id),
@@ -614,6 +642,150 @@ export function createApp(
     if (!name) return c.json({ error: "Household name is required." }, 400);
     await sql.run("UPDATE households SET name = ? WHERE id = ?", name, user.household_id);
     return c.json(await getHousehold(sql, user.household_id));
+  });
+  app.patch("/api/account", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    if (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+      return c.json({ error: "Enter a valid email address." }, 400);
+    }
+    await sql.run("UPDATE users SET email = ? WHERE id = ?", email, user.id);
+    const fresh = await getUserById(sql, user.id);
+    if (!fresh) return c.json({ error: "Account not found." }, 404);
+    return c.json(toPublicUser({ ...fresh, email: fresh.email ?? "" }));
+  });
+
+  app.post("/api/account/test-email", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const to = (user.email ?? "").trim();
+    if (!to) return c.json({ error: "Add an email to your account first." }, 400);
+    const sent = await sendAccountMail(
+      to,
+      "Basket test email",
+      `Hi ${user.display_name},\n\nEmail sending works. Basket will use this address for shared items and lists.\n`,
+    );
+    if (!("ok" in sent)) return c.json({ error: sent.error }, sent.status as 500);
+    return c.json({ ok: true, to });
+  });
+
+  app.post("/api/share/email", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const to = (user.email ?? "").trim();
+    if (!to) return c.json({ error: "Add an email to your account first." }, 400);
+    let subject = "";
+    let text = "";
+    if (typeof body.itemId === "string" && body.itemId) {
+      const item = await getItemForHousehold(sql, body.itemId, user.household_id);
+      if (!item) return c.json({ error: "Item not found." }, 404);
+      subject = `Basket: ${item.name}`;
+      text = [`${item.quantity ? `${item.quantity} × ` : ""}${item.name}`, item.notes]
+        .filter(Boolean)
+        .join("\n");
+    } else if (typeof body.listId === "string" && body.listId) {
+      const list = await getListForHousehold(sql, body.listId, user.household_id);
+      if (!list) return c.json({ error: "List not found." }, 404);
+      const items = (await listItems(sql, user.household_id)).filter(
+        (i) => i.listId === list.id && !i.checked,
+      );
+      subject = `Basket: ${list.name}`;
+      text = [`${list.name} (${items.length} to buy)`, "", ...items.map((i) =>
+        `• ${i.quantity ? `${i.quantity} × ` : ""}${i.name}`,
+      )].join("\n");
+    } else {
+      return c.json({ error: "Item or list is required." }, 400);
+    }
+    const sent = await sendAccountMail(to, subject, text);
+    if (!("ok" in sent)) return c.json({ error: sent.error }, sent.status as 500);
+    return c.json({ ok: true, to });
+  });
+
+  app.get("/api/storage/usage", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const row = await c.get("sql").get<{ n: number; b: number }>(
+      "SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS b FROM notes WHERE household_id = ? AND file_size IS NOT NULL",
+      user.household_id,
+    );
+    return c.json({ files: Number(row?.n ?? 0), bytes: Number(row?.b ?? 0) });
+  });
+
+  app.get("/api/storage/files", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const rows = await c.get("sql").all<{
+      id: string;
+      title: string;
+      file_mime: string;
+      file_size: number;
+      updated_at: number;
+    }>(
+      "SELECT id, title, file_mime, file_size, updated_at FROM notes WHERE household_id = ? AND file_mime IS NOT NULL ORDER BY updated_at DESC LIMIT 200",
+      user.household_id,
+    );
+    return c.json(rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      mime: r.file_mime,
+      size: Number(r.file_size ?? 0),
+      updatedAt: Number(r.updated_at ?? 0),
+    })));
+  });
+
+  const CLOUD_PROVIDERS = ["google", "apple", "proton", "dropbox"];
+
+  app.get("/api/cloud/links", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const rows = await c.get("sql").all<{
+      provider: string;
+      status: string;
+      account_email: string;
+    }>(
+      "SELECT provider, status, account_email FROM cloud_links WHERE household_id = ? ORDER BY provider",
+      user.household_id,
+    );
+    return c.json(rows.map((r) => ({
+      provider: r.provider,
+      status: r.status,
+      accountEmail: r.account_email ?? "",
+    })));
+  });
+
+  app.post("/api/cloud/links", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const provider = typeof body.provider === "string" ? body.provider : "";
+    if (!CLOUD_PROVIDERS.includes(provider)) return c.json({ error: "Unknown provider." }, 400);
+    const accountEmail = typeof body.accountEmail === "string" ? body.accountEmail.trim().slice(0, 254) : "";
+    await c.get("sql").run(
+      `INSERT INTO cloud_links (household_id, provider, status, account_email, created_at)
+       VALUES (?, ?, 'pending', ?, ?)
+       ON CONFLICT (household_id, provider) DO UPDATE SET account_email = excluded.account_email`,
+      user.household_id,
+      provider,
+      accountEmail,
+      Date.now(),
+    );
+    return c.json({ provider, status: "pending", accountEmail });
+  });
+
+  app.delete("/api/cloud/links/:provider", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    await c.get("sql").run(
+      "DELETE FROM cloud_links WHERE household_id = ? AND provider = ?",
+      user.household_id,
+      c.req.param("provider"),
+    );
+    return c.body(null, 204);
   });
 
   app.post("/api/household/invite/rotate", async (c) => {

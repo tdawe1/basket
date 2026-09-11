@@ -714,4 +714,73 @@ describe("api", { concurrency: 1 }, () => {
     const after = await inner.get<{ n: number }>("SELECT COUNT(*) AS n FROM households");
     assert.equal(Number(after?.n ?? 0), Number(before?.n ?? 0));
   });
+
+  it("account email, storage, cloud links, share-via-email", async () => {
+    cookieJar.clear();
+    const created = await api("/api/auth/register", {
+      body: {
+        householdName: "Mail House",
+        displayName: "Mo",
+        username: "mo_mail",
+        password: "password1",
+      },
+    });
+    assert.equal(created.status, 200);
+
+    const bad = await api("/api/account", { method: "PATCH", body: { email: "not-an-email" } });
+    assert.equal(bad.status, 400);
+
+    const saved = (await api("/api/account", { method: "PATCH", body: { email: "mo@example.com" } })).json as {
+      email?: string;
+    };
+    assert.equal(saved.email, "mo@example.com");
+    const boot = (await api("/api/bootstrap")).json as { user: { email?: string } };
+    assert.equal(boot.user.email, "mo@example.com");
+
+    const usage = (await api("/api/storage/usage")).json as { files: number; bytes: number };
+    assert.equal(usage.files, 0);
+    assert.equal(usage.bytes, 0);
+    const files = (await api("/api/storage/files")).json as unknown[];
+    assert.deepEqual(files, []);
+
+    const unknown = await api("/api/cloud/links", { body: { provider: "geocities" } });
+    assert.equal(unknown.status, 400);
+    const linked = (await api("/api/cloud/links", { body: { provider: "google" } })).json as {
+      provider: string;
+      status: string;
+    };
+    assert.equal(linked.provider, "google");
+    assert.equal(linked.status, "pending");
+    const links = (await api("/api/cloud/links")).json as Array<{ provider: string }>;
+    assert.ok(links.some((l) => l.provider === "google"));
+    const unlinked = await api("/api/cloud/links/google", { method: "DELETE" });
+    assert.equal(unlinked.status, 204);
+
+    // No SMTP in the test env: configured address, unconfigured transport.
+    const item = (
+      await api("/api/lists/unknown/items", { body: { name: "x" } })
+    );
+    assert.equal(item.status, 404);
+    const boot2 = (await api("/api/bootstrap")).json as { lists: Array<{ id: string }> };
+    const posted = (
+      await api(`/api/lists/${boot2.lists[0].id}/items`, { body: { name: "Eggs" } })
+    ).json as { id: string };
+    const shared = await api("/api/share/email", { body: { itemId: posted.id } });
+    assert.equal(shared.status, 503);
+    const tested = await api("/api/account/test-email", { method: "POST", body: {} });
+    assert.equal(tested.status, 503);
+
+    cookieJar.clear();
+    const created2 = await api("/api/auth/register", {
+      body: {
+        householdName: "No Mail House",
+        displayName: "No",
+        username: "no_mail",
+        password: "password1",
+      },
+    });
+    assert.equal(created2.status, 200);
+    const noAddr = await api("/api/account/test-email", { method: "POST", body: {} });
+    assert.equal(noAddr.status, 400);
+  });
 });
