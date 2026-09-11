@@ -1,4 +1,4 @@
-import type { Household, Item, List, Note, PublicUser, Reminder, Suggestion } from "../shared/types.ts";
+import type { Household, Item, List, Note, PublicUser, Reminder, Section, Suggestion } from "../shared/types.ts";
 import { formatInvite, SESSION_MS } from "./auth.ts";
 import type { Sql } from "./sql.ts";
 
@@ -17,7 +17,7 @@ const ONLINE_MS = 20_000;
 
 const ITEM_SELECT = `
   SELECT
-    i.id, i.list_id, i.name, i.quantity, i.category, i.notes, i.checked,
+    i.id, i.list_id, i.name, i.quantity, i.category, i.notes, i.checked, i.section_id,
     i.created_at, i.updated_at,
     a.id AS added_id, a.display_name AS added_name, a.username AS added_username, a.color AS added_color,
     c.id AS checked_id, c.display_name AS checked_name, c.username AS checked_username, c.color AS checked_color
@@ -34,6 +34,7 @@ type ItemJoin = {
   category: string;
   notes: string;
   checked: number;
+  section_id: string;
   created_at: number;
   updated_at: number;
   added_id: string;
@@ -69,6 +70,7 @@ export function mapItem(row: ItemJoin): Item {
     category: row.category,
     notes: row.notes,
     checked: Number(row.checked) === 1,
+    sectionId: row.section_id || null,
     addedBy: {
       id: row.added_id,
       displayName: row.added_name,
@@ -258,6 +260,67 @@ export async function nextListSort(sql: Sql, householdId: string): Promise<numbe
   );
   return row?.n ?? 0;
 }
+export function mapSection(row: {
+  id: string;
+  list_id: string;
+  name: string;
+  sort_order: number;
+  created_at: number;
+}): Section {
+  return {
+    id: row.id,
+    listId: row.list_id,
+    name: row.name,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+  };
+}
+
+export async function listSections(sql: Sql, householdId: string): Promise<Section[]> {
+  const rows = await sql.all<{
+    id: string;
+    list_id: string;
+    name: string;
+    sort_order: number;
+    created_at: number;
+  }>(
+    `SELECT s.id, s.list_id, s.name, s.sort_order, s.created_at
+     FROM sections s JOIN lists l ON l.id = s.list_id
+     WHERE l.household_id = ?
+     ORDER BY s.sort_order ASC, s.created_at ASC`,
+    householdId,
+  );
+  return rows.map(mapSection);
+}
+
+export async function getSectionForHousehold(
+  sql: Sql,
+  sectionId: string,
+  householdId: string,
+): Promise<Section | undefined> {
+  const row = await sql.get<{
+    id: string;
+    list_id: string;
+    name: string;
+    sort_order: number;
+    created_at: number;
+  }>(
+    `SELECT s.id, s.list_id, s.name, s.sort_order, s.created_at
+     FROM sections s JOIN lists l ON l.id = s.list_id
+     WHERE s.id = ? AND l.household_id = ?`,
+    sectionId,
+    householdId,
+  );
+  return row ? mapSection(row) : undefined;
+}
+
+export async function nextSectionSort(sql: Sql, listId: string): Promise<number> {
+  const row = await sql.get<{ n: number }>(
+    "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM sections WHERE list_id = ?",
+    listId,
+  );
+  return row?.n ?? 0;
+}
 
 export async function memberCount(sql: Sql, householdId: string): Promise<number> {
   const row = await sql.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE household_id = ?", householdId);
@@ -267,6 +330,7 @@ export async function memberCount(sql: Sql, householdId: string): Promise<number
 type ReminderJoin = {
   id: string;
   list_id: string | null;
+  item_id: string | null;
   kind: string;
   title: string;
   due_at: number;
@@ -282,7 +346,8 @@ export function mapReminder(row: ReminderJoin): Reminder {
   return {
     id: row.id,
     listId: row.list_id,
-    kind: row.kind === "nudge" ? "nudge" : "trip",
+    itemId: row.item_id,
+    kind: row.kind === "nudge" ? "nudge" : row.kind === "item" ? "item" : "trip",
     title: row.title,
     dueAt: row.due_at,
     durationMin: row.duration_min,
@@ -307,6 +372,11 @@ export async function pruneReminders(sql: Sql, householdId: string, now = Date.n
     householdId,
     now - 7 * 24 * 60 * 60 * 1000,
   );
+  await sql.run(
+    "DELETE FROM reminders WHERE household_id = ? AND kind = 'item' AND due_at < ?",
+    householdId,
+    now - 7 * 24 * 60 * 60 * 1000,
+  );
 }
 
 function isMissingRemindersTable(err: unknown): boolean {
@@ -323,19 +393,21 @@ export async function listReminders(sql: Sql, householdId: string, now = Date.no
   }
   try {
     const rows = await sql.all<ReminderJoin>(
-      `SELECT r.id, r.list_id, r.kind, r.title, r.due_at, r.duration_min, r.created_at,
+      `SELECT r.id, r.list_id, r.item_id, r.kind, r.title, r.due_at, r.duration_min, r.created_at,
               u.id AS uid, u.display_name, u.username, u.color
        FROM reminders r
        JOIN users u ON u.id = r.created_by
-       WHERE r.household_id = ?
-         AND (
-           (r.kind = 'nudge' AND r.created_at > ?)
-           OR (r.kind = 'trip' AND r.due_at > ?)
-         )
-       ORDER BY r.due_at ASC
-       LIMIT 50`,
+      WHERE r.household_id = ?
+        AND (
+          (r.kind = 'nudge' AND r.created_at > ?)
+          OR (r.kind = 'trip' AND r.due_at > ?)
+          OR (r.kind = 'item' AND r.due_at > ?)
+        )
+      ORDER BY r.due_at ASC
+      LIMIT 50`,
       householdId,
       now - 60 * 60 * 1000,
+      now - 12 * 60 * 60 * 1000,
       now - 12 * 60 * 60 * 1000,
     );
     return rows.map(mapReminder);
@@ -351,7 +423,7 @@ export async function getReminderForHousehold(
   householdId: string,
 ): Promise<Reminder | undefined> {
   const row = await sql.get<ReminderJoin>(
-    `SELECT r.id, r.list_id, r.kind, r.title, r.due_at, r.duration_min, r.created_at,
+    `SELECT r.id, r.list_id, r.item_id, r.kind, r.title, r.due_at, r.duration_min, r.created_at,
             u.id AS uid, u.display_name, u.username, u.color
      FROM reminders r
      JOIN users u ON u.id = r.created_by

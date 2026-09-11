@@ -24,6 +24,14 @@ export type List = {
   createdAt: number;
 };
 
+export type Section = {
+  id: string;
+  listId: string;
+  name: string;
+  sortOrder: number;
+  createdAt: number;
+};
+
 export type Item = {
   id: string;
   listId: string;
@@ -32,6 +40,7 @@ export type Item = {
   category: string;
   notes: string;
   checked: boolean;
+  sectionId: string | null;
   addedBy: PublicUser;
   checkedBy: PublicUser | null;
   createdAt: number;
@@ -45,11 +54,12 @@ export type Suggestion = {
   count: number;
 };
 
-export type ReminderKind = "trip" | "nudge";
+export type ReminderKind = "trip" | "nudge" | "item";
 
 export type Reminder = {
   id: string;
   listId: string | null;
+  itemId: string | null;
   kind: ReminderKind;
   title: string;
   dueAt: number;
@@ -70,10 +80,35 @@ export type Note = {
   updatedAt: number;
 };
 
+export type VaultItemSummary = {
+  id: string;
+  title: string;
+  itemType: string;
+  state: string;
+};
+
+export type VaultItemDetail = VaultItemSummary & {
+  note: string;
+  fields: Record<string, unknown>;
+};
+
+export type VaultStatus = {
+  configured: boolean;
+  vault: string;
+  source: "cache" | "live" | "unavailable";
+  syncedAt: number | null;
+  count: number;
+};
+
+export type VaultList = {
+  vault: string;
+  items: VaultItemSummary[];
+};
 export type Bootstrap = {
   user: PublicUser;
   household: Household;
   lists: List[];
+  sections: Section[];
   items: Item[];
   reminders: Reminder[];
   notes: Note[];

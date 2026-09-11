@@ -51,13 +51,22 @@ CREATE TABLE IF NOT EXISTS items (
   category TEXT NOT NULL DEFAULT 'other',
   notes TEXT NOT NULL DEFAULT '',
   checked INTEGER NOT NULL DEFAULT 0,
+  section_id TEXT NOT NULL DEFAULT '',
   added_by TEXT NOT NULL REFERENCES users(id),
   checked_by TEXT REFERENCES users(id),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sections (
+  id TEXT PRIMARY KEY,
+  list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id, checked, created_at);
+CREATE INDEX IF NOT EXISTS idx_sections_list ON sections(list_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_lists_household ON lists(household_id);
 CREATE INDEX IF NOT EXISTS idx_users_household ON users(household_id);
@@ -66,6 +75,7 @@ CREATE TABLE IF NOT EXISTS reminders (
   id TEXT PRIMARY KEY,
   household_id TEXT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   list_id TEXT REFERENCES lists(id) ON DELETE SET NULL,
+  item_id TEXT,
   kind TEXT NOT NULL DEFAULT 'trip',
   title TEXT NOT NULL,
   due_at INTEGER NOT NULL,
@@ -138,12 +148,36 @@ CREATE TABLE IF NOT EXISTS recovery_codes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON recovery_codes(user_id);
+
+CREATE TABLE IF NOT EXISTS vault_items (
+  vault TEXT NOT NULL DEFAULT 'Shared',
+  id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  item_type TEXT NOT NULL DEFAULT 'unknown',
+  state TEXT NOT NULL DEFAULT 'Active',
+  note TEXT NOT NULL DEFAULT '',
+  fields TEXT NOT NULL DEFAULT '{}',
+  synced_at INTEGER NOT NULL,
+  PRIMARY KEY (vault, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_items_vault ON vault_items(vault, title);
 `;
 
 export async function ensureSchema(sql: Sql): Promise<void> {
   await sql.exec(SCHEMA);
   try {
     await sql.exec("ALTER TABLE users ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    // already present
+  }
+  try {
+    await sql.exec("ALTER TABLE items ADD COLUMN section_id TEXT NOT NULL DEFAULT ''");
+  } catch {
+    // already present
+  }
+  try {
+    await sql.exec("ALTER TABLE reminders ADD COLUMN item_id TEXT");
   } catch {
     // already present
   }

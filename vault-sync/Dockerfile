@@ -1,20 +1,7 @@
-FROM node:24-bookworm-slim AS build
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
+# Small sidecar for the shared-passwords section: polls Proton Pass and pushes
+# a cache into Basket. No token is baked in; configure it at runtime.
 FROM node:24-bookworm-slim
 WORKDIR /app
-ENV NODE_ENV=production
-ENV DATA_DIR=/data
-ENV PORT=3000
-ENV HOST=0.0.0.0
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && mkdir -p /data
-# Proton Pass CLI for the shared-passwords section (no token baked in;
-# configure PROTON_PASS_PERSONAL_ACCESS_TOKEN at runtime). Pinned + checksummed.
 ARG PASS_CLI_VERSION=2.3.3
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists \
@@ -23,9 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
   && curl -fsSL "https://github.com/protonpass/pass-cli/releases/download/${PASS_CLI_VERSION}/pass-cli-linux-x86_64.sha256" -o /tmp/pass-cli.sha256 \
   && [ "$(sha256sum /usr/local/bin/pass-cli | cut -d' ' -f1)" = "$(cut -d' ' -f1 /tmp/pass-cli.sha256)" ] \
   && rm /tmp/pass-cli.sha256
-COPY --from=build /app/dist ./dist
-COPY src/server ./src/server
-COPY src/shared ./src/shared
-EXPOSE 3000
-VOLUME /data
-CMD ["npx", "tsx", "src/server/index.ts"]
+COPY sync.mjs ./
+ENV PROTON_PASS_VAULT=Shared
+ENV PASS_CLI_BIN=pass-cli
+ENV SYNC_INTERVAL_S=300
+CMD ["node", "sync.mjs"]

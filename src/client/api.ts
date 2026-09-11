@@ -1,4 +1,4 @@
-import type { Bootstrap, Household, Item, List, Note, Reminder, Suggestion } from "../shared/types.ts";
+import type { Bootstrap, Household, Item, List, Note, Reminder, Section, Suggestion, VaultItemDetail, VaultList, VaultStatus } from "../shared/types.ts";
 
 export class ApiError extends Error {
   status: number;
@@ -62,13 +62,18 @@ export const api = {
   updateList: (id: string, body: { name?: string; emoji?: string }) =>
     request<List>(`/api/lists/${id}`, { method: "PATCH", json: body }),
   deleteList: (id: string) => request(`/api/lists/${id}`, { method: "DELETE" }),
+  createSection: (listId: string, body: { name: string }) =>
+    request<Section>(`/api/lists/${listId}/sections`, { method: "POST", json: body }),
+  updateSection: (id: string, body: { name: string }) =>
+    request<Section>(`/api/sections/${id}`, { method: "PATCH", json: body }),
+  deleteSection: (id: string) => request(`/api/sections/${id}`, { method: "DELETE" }),
   addItem: (
     listId: string,
-    body: { name: string; quantity?: string; category?: string; notes?: string },
+    body: { name: string; quantity?: string; category?: string; notes?: string; sectionId?: string | null },
   ) => request<Item>(`/api/lists/${listId}/items`, { method: "POST", json: body }),
   updateItem: (
     id: string,
-    body: Partial<{ name: string; quantity: string; category: string; notes: string; checked: boolean }>,
+    body: Partial<{ name: string; quantity: string; category: string; notes: string; sectionId: string | null; checked: boolean }>,
   ) => request<Item>(`/api/items/${id}`, { method: "PATCH", json: body }),
   deleteItem: (id: string) => request(`/api/items/${id}`, { method: "DELETE" }),
   clearChecked: (listId: string) =>
@@ -76,9 +81,10 @@ export const api = {
   suggestions: (q: string) =>
     request<Suggestion[]>(`/api/suggestions?q=${encodeURIComponent(q)}`),
   createReminder: (body: {
-    kind: "trip" | "nudge";
+    kind: "trip" | "nudge" | "item";
     title?: string;
     listId?: string;
+    itemId?: string;
     dueAt?: number;
     durationMin?: number;
   }) => request<Reminder>("/api/reminders", { method: "POST", json: body }),
@@ -105,4 +111,7 @@ export const api = {
   deleteNoteFile: (id: string) => request<Note>(`/api/notes/${id}/file`, { method: "DELETE" }),
   noteFileUrl: (id: string, download = false) =>
     `/api/notes/${id}/file${download ? "?download=1" : ""}`,
+  vaultStatus: () => request<VaultStatus>("/api/vault/status"),
+  vaultItems: () => request<VaultList>("/api/vault/items"),
+  vaultItem: (id: string) => request<VaultItemDetail>(`/api/vault/items/${encodeURIComponent(id)}`),
 };
