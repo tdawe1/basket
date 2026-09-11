@@ -8,7 +8,17 @@ services:
       DATA_DIR: /data
       # Set to "true" if you put Basket behind HTTPS.
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      # Shared passwords (Proton Pass CLI). Unset hides the Passwords section.
+      PROTON_PASS_PERSONAL_ACCESS_TOKEN: "${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}"
+      PROTON_PASS_VAULT: "${PROTON_PASS_VAULT:-Shared}"
+      PASS_CLI_BIN: "${PASS_CLI_BIN:-pass-cli}"
       TZ: Europe/London
+      # Sync-secret shared with the vault-sync sidecar (empty = sync disabled).
+      VAULT_SYNC_SECRET: "${VAULT_SYNC_SECRET:-}"
+      # Key that encrypts cached credential payloads (empty = cache locked).
+      VAULT_CACHE_KEY: "${VAULT_CACHE_KEY:-}"
+      # Optional household restriction for the Passwords section.
+      VAULT_HOUSEHOLD_ID: "${VAULT_HOUSEHOLD_ID:-}"
     volumes:
       - basket-data:/data
     restart: unless-stopped
@@ -17,6 +27,20 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+  vault-sync:
+    build: ./vault-sync
+    environment:
+      PROTON_PASS_PERSONAL_ACCESS_TOKEN: "${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}"
+      PROTON_PASS_VAULT: "${PROTON_PASS_VAULT:-Shared}"
+      PASS_CLI_BIN: "pass-cli"
+      SYNC_URL: "http://basket:3000/api/vault/sync"
+      VAULT_SYNC_SECRET: "${VAULT_SYNC_SECRET:-}"
+      SYNC_INTERVAL_S: "${VAULT_SYNC_INTERVAL_S:-300}"
+      TZ: Europe/London
+    depends_on:
+      basket:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   basket-data:

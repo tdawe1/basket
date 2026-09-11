@@ -18,26 +18,37 @@ import type {
   Note,
   PublicUser,
   Reminder,
+  Section,
   Suggestion,
 } from "../shared/types.ts";
 import { ApiError, api } from "./api.ts";
 import { I18n, detectLang, t, useT, type Lang, type MsgKey } from "./i18n.ts";
 import { NotesSection } from "./Notes.tsx";
+import { VaultSection } from "./Vault.tsx";
 import { downloadIcs, loadSeenReminders, markReminderSeen, requestNotifyPermission, showAppNotification } from "./notify.ts";
 
-type Theme = "system" | "light" | "dark";
+const THEMES = ["system", "light", "dark", "ocean", "sunset", "forest"] as const;
+type Theme = (typeof THEMES)[number];
 type AuthTab = "login" | "create" | "join";
+
+const THEME_META: Record<Exclude<Theme, "system">, { tone: "light" | "dark"; color: string }> = {
+  light: { tone: "light", color: "#f3eee4" },
+  dark: { tone: "dark", color: "#161310" },
+  ocean: { tone: "dark", color: "#0f1b26" },
+  sunset: { tone: "light", color: "#fbf0e4" },
+  forest: { tone: "dark", color: "#101a12" },
+};
 
 const LIST_EMOJIS = ["🛒", "🏠", "🛠️", "💊", "🎁", "🐾", "🧴", "🧺", "📦", "🎄"];
 
 function applyTheme(theme: Theme) {
-  const dark =
-    theme === "dark" ||
-    (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  const color = dark ? "#161310" : "#f3eee4";
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", color);
+  const resolved: Exclude<Theme, "system"> =
+    theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
+  const meta = THEME_META[resolved];
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.dataset.tone = meta.tone;
+  const tag = document.querySelector('meta[name="theme-color"]');
+  if (tag) tag.setAttribute("content", meta.color);
 }
 
 function initials(name: string): string {
@@ -61,7 +72,7 @@ function formatDue(ms: number, lang: Lang): string {
 function upcomingTrips(reminders: Reminder[]): Reminder[] {
   const cutoff = Date.now() - 30 * 60_000;
   return reminders
-    .filter((r) => r.kind === "trip" && r.dueAt > cutoff)
+    .filter((r) => (r.kind === "trip" || r.kind === "item") && r.dueAt > cutoff)
     .sort((a, b) => a.dueAt - b.dueAt);
 }
 
@@ -95,13 +106,14 @@ export function App() {
 
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem("basket-theme");
-    return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+    return (THEMES as readonly string[]).includes(saved ?? "") ? (saved as Theme) : "system";
   });
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<PublicUser | null>(null);
   const [household, setHousehold] = useState<Household | null>(null);
   const [lists, setLists] = useState<List[]>([]);
   const [items, setItems] = useState<Item[]>([]);
+  const [sections, setSections] = useState<Section[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeListId, setActiveListId] = useState<string | null>(null);
@@ -136,6 +148,7 @@ export function App() {
     setHousehold(data.household);
     setLists(data.lists);
     setItems(data.items);
+    setSections(data.sections ?? []);
     setReminders(data.reminders ?? []);
     setNotes(data.notes ?? []);
     setActiveListId((current) => {
@@ -165,7 +178,7 @@ export function App() {
   useEffect(() => {
     if (!user) return;
     const next = reminders
-      .filter((r) => r.kind === "trip" && r.dueAt > Date.now())
+      .filter((r) => (r.kind === "trip" || r.kind === "item") && r.dueAt > Date.now())
       .sort((a, b) => a.dueAt - b.dueAt)[0];
     if (!next) return;
     const delay = Math.min(Math.max(next.dueAt - Date.now() + 80, 0), 2_147_000_000);
@@ -204,13 +217,15 @@ export function App() {
       if (now < reminder.dueAt) continue;
       seen.add(reminder.id);
       markReminderSeen(reminder.id);
-      const title = t(lang, "tripNotifyTitle");
-      const body = t(lang, "tripNotifyBody", { list: listLabel, count });
+      const title = reminder.kind === "item" ? reminder.title : t(lang, "tripNotifyTitle");
+      const body =
+        reminder.kind === "item"
+          ? t(lang, "itemNotifyBody", { title: reminder.title, list: listLabel })
+          : t(lang, "tripNotifyBody", { list: listLabel, count });
       void showAppNotification(title, body, reminder.id);
       show(body);
     }
   }, [reminders, user, items, lists, lang, show]);
-
   const inner = (() => {
   if (loading) {
     return (
@@ -240,6 +255,7 @@ export function App() {
         household={household}
         lists={lists}
         items={items}
+        sections={sections}
         reminders={reminders}
         notes={notes}
         online={online}
@@ -544,6 +560,7 @@ function Home({
   household,
   lists,
   items,
+  sections,
   reminders,
   notes,
   online,
@@ -561,6 +578,7 @@ function Home({
   household: Household;
   lists: List[];
   items: Item[];
+  sections: Section[];
   reminders: Reminder[];
   notes: Note[];
   online: string[];
@@ -579,9 +597,10 @@ function Home({
   const [remindOpen, setRemindOpen] = useState(false);
   const [newListOpen, setNewListOpen] = useState(false);
   const [editing, setEditing] = useState<Item | null>(null);
-  const [section, setSection] = useState<"shop" | "notes">("shop");
+  const [section, setSection] = useState<"shop" | "notes" | "vault">("shop");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(notes[0]?.id ?? null);
   const listItems = items.filter((i) => activeList && i.listId === activeList.id);
+  const listSections = sections.filter((s) => activeList && s.listId === activeList.id);
   const members = household.members.map((m) => ({ ...m, online: online.includes(m.id) }));
   const trips = upcomingTrips(reminders);
   const nextTrip = trips[0];
@@ -661,6 +680,13 @@ function Home({
           >
             📝 {t("notesSection")}
           </button>
+          <button
+            type="button"
+            className={`chip notes-tab ${section === "vault" ? "active" : ""}`}
+            onClick={() => setSection("vault")}
+          >
+            🔑 {t("vaultSection")}
+          </button>
           <div className="side-notes">
             <div className="group-label">{t("notesSection")}</div>
             {notes.map((note) => (
@@ -693,6 +719,13 @@ function Home({
             >
               {t("addNote")}
             </button>
+            <button
+              type="button"
+              className={`chip ${section === "vault" ? "active" : ""}`}
+              onClick={() => setSection("vault")}
+            >
+              🔑 {t("vaultSection")}
+            </button>
           </div>
           {trips.length > 0 && (
             <div className="side-upcoming">
@@ -718,6 +751,8 @@ function Home({
               onToast={onToast}
               onRefresh={onRefresh}
             />
+          ) : section === "vault" ? (
+            <VaultSection onToast={onToast} />
           ) : (
             <>
               {nextTrip && (
@@ -729,6 +764,33 @@ function Home({
               {activeList ? (
                 <ListBody
                   items={listItems}
+                  sections={listSections}
+                  onToast={onToast}
+                  onAddSection={async (name) => {
+                    if (!activeList) return;
+                    try {
+                      await api.createSection(activeList.id, { name });
+                      await onRefresh();
+                    } catch (error) {
+                      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                    }
+                  }}
+                  onRenameSection={async (id, name) => {
+                    try {
+                      await api.updateSection(id, { name });
+                      await onRefresh();
+                    } catch (error) {
+                      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                    }
+                  }}
+                  onDeleteSection={async (id) => {
+                    try {
+                      await api.deleteSection(id);
+                      await onRefresh();
+                    } catch (error) {
+                      onToast(error instanceof Error ? err(error.message) : t("cannotUpdate"));
+                    }
+                  }}
                   onToggle={async (item) => {
                     const previous = item;
                     const nextChecked = !item.checked;
@@ -765,6 +827,7 @@ function Home({
                               quantity: row.quantity,
                               category: row.category,
                               notes: row.notes,
+                              sectionId: row.sectionId,
                             });
                             if (row.checked) await api.updateItem(created.id, { checked: true });
                           }
@@ -840,6 +903,28 @@ function Home({
       {editing && (
         <EditItemSheet
           item={editing}
+          sections={sections.filter((s) => s.listId === editing.listId)}
+          itemReminder={reminders.find((r) => r.kind === "item" && r.itemId === editing.id) ?? null}
+          onSetReminder={async (dueAt) => {
+            try {
+              await api.createReminder({ kind: "item", itemId: editing.id, dueAt });
+              onToast(t("reminderSet"));
+              await onRefresh();
+            } catch (error) {
+              onToast(error instanceof Error ? err(error.message) : t("cannotRemind"));
+            }
+          }}
+          onClearReminder={async () => {
+            const current = reminders.find((r) => r.kind === "item" && r.itemId === editing.id);
+            if (!current) return;
+            try {
+              await api.deleteReminder(current.id);
+              onToast(t("reminderRemoved"));
+              await onRefresh();
+            } catch (error) {
+              onToast(error instanceof Error ? err(error.message) : t("cannotRemind"));
+            }
+          }}
           onClose={() => setEditing(null)}
           onToast={onToast}
           onRefresh={onRefresh}
@@ -849,26 +934,145 @@ function Home({
   );
 }
 
-function ListBody({
+function ItemGroups({
   items,
   onToggle,
   onEdit,
-  onClear,
+  onToast,
 }: {
   items: Item[];
   onToggle: (item: Item) => void;
   onEdit: (item: Item) => void;
-  onClear: () => void;
+  onToast: (s: string) => void;
 }) {
-  const { t, tCat } = useT();
-  const unchecked = items.filter((i) => !i.checked);
-  const checked = items.filter((i) => i.checked);
+  const { tCat } = useT();
   const groups = CATEGORIES.map((cat) => ({
     cat,
-    items: unchecked.filter(
-              (i) => (CATEGORY_IDS.has(i.category) ? i.category : "other") === cat.id,
-            ),
+    items: items.filter((i) => (CATEGORY_IDS.has(i.category) ? i.category : "other") === cat.id),
   })).filter((g) => g.items.length > 0);
+  return (
+    <>
+      {groups.map((group) => (
+        <section key={group.cat.id}>
+          <div className="group-label">
+            <span>{group.cat.emoji}</span> {tCat(group.cat.id)}
+          </div>
+          {group.items.map((item, idx) => (
+            <ItemRow
+              key={item.id}
+              item={item}
+              start={idx === 0}
+              end={idx === group.items.length - 1}
+              onToggle={() => onToggle(item)}
+              onEdit={() => onEdit(item)}
+              onToast={onToast}
+            />
+          ))}
+        </section>
+      ))}
+    </>
+  );
+}
+function SectionBlock({
+  section,
+  items,
+  onToggle,
+  onEdit,
+  onToast,
+  onRenameSection,
+  onDeleteSection,
+}: {
+  section: Section;
+  items: Item[];
+  onToggle: (item: Item) => void;
+  onEdit: (item: Item) => void;
+  onToast: (s: string) => void;
+  onRenameSection: (id: string, name: string) => Promise<void>;
+  onDeleteSection: (id: string) => Promise<void>;
+}) {
+  const { t } = useT();
+  const [renaming, setRenaming] = useState(false);
+  const [name, setName] = useState(section.name);
+  return (
+    <section className="shop-section">
+      <div className="group-label section-head">
+        {renaming ? (
+          <form
+            className="section-rename"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const next = name.trim();
+              if (next && next !== section.name) await onRenameSection(section.id, next);
+              setRenaming(false);
+            }}
+          >
+            <input
+              className="input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={40}
+            />
+            <button type="submit" className="btn small">
+              {t("save")}
+            </button>
+          </form>
+        ) : (
+          <>
+            <span>🗂️ {section.name}</span>
+            <span className="section-actions">
+              <button type="button" className="icon-btn" aria-label={t("rename")} onClick={() => { setName(section.name); setRenaming(true); }}>
+                <Pencil />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={t("remove")}
+                onClick={() => {
+                  if (confirm(t("removeSectionConfirm", { name: section.name }))) void onDeleteSection(section.id);
+                }}
+              >
+                ×
+              </button>
+            </span>
+          </>
+        )}
+      </div>
+      <ItemGroups items={items} onToggle={onToggle} onEdit={onEdit} onToast={onToast} />
+    </section>
+  );
+}
+
+function ListBody({
+  items,
+  sections,
+  onToggle,
+  onEdit,
+  onToast,
+  onClear,
+  onAddSection,
+  onRenameSection,
+  onDeleteSection,
+}: {
+  items: Item[];
+  sections: Section[];
+  onToggle: (item: Item) => void;
+  onEdit: (item: Item) => void;
+  onToast: (s: string) => void;
+  onClear: () => void;
+  onAddSection: (name: string) => Promise<void>;
+  onRenameSection: (id: string, name: string) => Promise<void>;
+  onDeleteSection: (id: string) => Promise<void>;
+}) {
+  const { t, tCat } = useT();
+  const [addingSection, setAddingSection] = useState(false);
+  const [sectionName, setSectionName] = useState("");
+  const unchecked = items.filter((i) => !i.checked);
+  const checked = items.filter((i) => i.checked);
+  const loose = unchecked.filter((i) => !i.sectionId);
+  const blocks = sections.map((s) => ({
+    section: s,
+    items: unchecked.filter((i) => i.sectionId === s.id),
+  }));
 
   if (items.length === 0) {
     return (
@@ -883,22 +1087,18 @@ function ListBody({
 
   return (
     <div className="list-body">
-      {groups.map((group) => (
-        <section key={group.cat.id}>
-          <div className="group-label">
-            <span>{group.cat.emoji}</span> {tCat(group.cat.id)}
-          </div>
-          {group.items.map((item, idx) => (
-            <ItemRow
-              key={item.id}
-              item={item}
-              start={idx === 0}
-              end={idx === group.items.length - 1}
-              onToggle={() => onToggle(item)}
-              onEdit={() => onEdit(item)}
-            />
-          ))}
-        </section>
+      <ItemGroups items={loose} onToggle={onToggle} onEdit={onEdit} onToast={onToast} />
+      {blocks.map((block) => (
+        <SectionBlock
+          key={block.section.id}
+          section={block.section}
+          items={block.items}
+          onToggle={onToggle}
+          onEdit={onEdit}
+          onToast={onToast}
+          onRenameSection={onRenameSection}
+          onDeleteSection={onDeleteSection}
+        />
       ))}
       {checked.length > 0 && (
         <section>
@@ -916,11 +1116,128 @@ function ListBody({
               end={idx === checked.length - 1}
               onToggle={() => onToggle(item)}
               onEdit={() => onEdit(item)}
+              onToast={onToast}
             />
           ))}
         </section>
       )}
+      {addingSection ? (
+        <form
+          className="section-add"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const name = sectionName.trim();
+            if (!name) return;
+            await onAddSection(name);
+            setSectionName("");
+            setAddingSection(false);
+          }}
+        >
+          <input
+            className="input"
+            value={sectionName}
+            onChange={(e) => setSectionName(e.target.value)}
+            placeholder={t("subsectionPh")}
+            maxLength={40}
+          />
+          <button type="submit" className="btn small">
+            {t("add")}
+          </button>
+          <button type="button" className="btn small ghost" onClick={() => setAddingSection(false)}>
+            {t("cancel")}
+          </button>
+        </form>
+      ) : (
+        <button type="button" className="btn ghost small" onClick={() => setAddingSection(true)}>
+          {t("addSubsection")}
+        </button>
+      )}
     </div>
+  );
+}
+
+function ItemMenu({
+  item,
+  x,
+  y,
+  onClose,
+  onToast,
+}: {
+  item: Item;
+  x: number;
+  y: number;
+  onClose: () => void;
+  onToast: (s: string) => void;
+}) {
+  const { t } = useT();
+  const [calOpen, setCalOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const style = {
+    left: Math.max(8, Math.min(x, window.innerWidth - 230)),
+    top: Math.max(8, Math.min(y, window.innerHeight - 230)),
+  };
+  function saveIcs(preset: DuePreset) {
+    const start = presetDue(preset);
+    const description = [item.quantity, item.notes].filter(Boolean).join(" · ");
+    downloadIcs("basket-item", buildIcs({
+      uid: `${item.id}@basket`,
+      title: `Buy ${item.name}`,
+      description,
+      start,
+      end: start + 60 * 60 * 1000,
+    }));
+    onToast(t("icsSaved"));
+    onClose();
+  }
+  function sendEmail() {
+    const subject = `Shopping: ${item.name}`;
+    const body = [`${item.quantity ? `${item.quantity} × ` : ""}${item.name}`, item.notes]
+      .filter(Boolean)
+      .join("\n");
+    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    onClose();
+  }
+  return (
+    <>
+      <div
+        className="menu-backdrop"
+        onClick={onClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onClose();
+        }}
+      />
+      <div className="item-menu" style={style} role="menu">
+        {!calOpen ? (
+          <>
+            <button type="button" onClick={() => setCalOpen(true)}>
+              📅 {t("addToCalendar")}
+            </button>
+            <button type="button" onClick={sendEmail}>
+              ✉️ {t("emailItem")}
+            </button>
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={() => saveIcs("evening")}>
+              {t("thisEvening")}
+            </button>
+            <button type="button" onClick={() => saveIcs("tomorrow")}>
+              {t("tomorrowMorning")}
+            </button>
+            <button type="button" onClick={() => saveIcs("saturday")}>
+              {t("saturdayMorning")}
+            </button>
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -930,14 +1247,18 @@ function ItemRow({
   end,
   onToggle,
   onEdit,
+  onToast,
 }: {
   item: Item;
   start: boolean;
   end: boolean;
   onToggle: () => void;
   onEdit: () => void;
+  onToast: (s: string) => void;
 }) {
   const { t } = useT();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const pressTimer = useRef(0);
   const cls = [
     "item",
     item.checked ? "checked" : "",
@@ -945,8 +1266,27 @@ function ItemRow({
   ]
     .filter(Boolean)
     .join(" ");
+  function cancelPress() {
+    window.clearTimeout(pressTimer.current);
+  }
   return (
-    <div className={cls}>
+    <div
+      className={cls}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+      onTouchStart={(e) => {
+        cancelPress();
+        const touch = e.touches[0];
+        pressTimer.current = window.setTimeout(() => {
+          if (navigator.vibrate) navigator.vibrate(8);
+          setMenu({ x: touch.clientX, y: touch.clientY });
+        }, 550);
+      }}
+      onTouchEnd={cancelPress}
+      onTouchMove={cancelPress}
+    >
       <button type="button" className="icon-btn" onClick={onToggle} aria-label={item.checked ? t("uncheck") : t("check")}>
         <span className="check">{item.checked ? "✓" : ""}</span>
       </button>
@@ -967,6 +1307,9 @@ function ItemRow({
       <button type="button" className="icon-btn qty-edit" onClick={onEdit} aria-label={t("edit")}>
         {item.quantity ? <span className="qty">{item.quantity}</span> : <Pencil />}
       </button>
+      {menu && (
+        <ItemMenu item={item} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onToast={onToast} />
+      )}
     </div>
   );
 }
@@ -1319,7 +1662,7 @@ function SettingsSheet({
         </div>
         <div className="group-label">{t("theme")}</div>
         <div className="theme-row">
-          {(["system", "light", "dark"] as Theme[]).map((mode) => (
+          {THEMES.map((mode) => (
             <button key={mode} className={`btn ${theme === mode ? "" : "ghost"}`} onClick={() => setTheme(mode)}>
               {t(mode)}
             </button>
@@ -1387,20 +1730,29 @@ function NewListSheet({
 
 function EditItemSheet({
   item,
+  sections,
+  itemReminder,
+  onSetReminder,
+  onClearReminder,
   onClose,
   onToast,
   onRefresh,
 }: {
   item: Item;
+  sections: Section[];
+  itemReminder: Reminder | null;
+  onSetReminder: (dueAt: number) => Promise<void>;
+  onClearReminder: () => Promise<void>;
   onClose: () => void;
   onToast: (s: string) => void;
   onRefresh: () => Promise<void>;
 }) {
-  const { t, err, tCat } = useT();
+  const { t, err, tCat, lang } = useT();
   const [name, setName] = useState(item.name);
   const [quantity, setQuantity] = useState(item.quantity);
   const [notes, setNotes] = useState(item.notes);
   const [category, setCategory] = useState(item.category);
+  const [sectionId, setSectionId] = useState(item.sectionId ?? "");
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -1430,6 +1782,48 @@ function EditItemSheet({
             </button>
           ))}
         </div>
+        {sections.length > 0 && (
+          <label>
+            {t("subsection")}
+            <select value={sectionId} onChange={(e) => setSectionId(e.target.value)}>
+              <option value="">{t("sectionNone")}</option>
+              {sections.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <div className="group-label">{t("setReminder")}</div>
+        {itemReminder ? (
+          <div className="reminder-row">
+            <span>{formatDue(itemReminder.dueAt, lang)}</span>
+            <button type="button" className="btn small ghost" onClick={() => void onClearReminder()}>
+              {t("deleteReminder")}
+            </button>
+          </div>
+        ) : (
+          <div className="preset-row">
+            {(
+              [
+                ["1h", t("inOneHour")],
+                ["evening", t("thisEvening")],
+                ["tomorrow", t("tomorrowMorning")],
+                ["saturday", t("saturdayMorning")],
+              ] as Array<[DuePreset, string]>
+            ).map(([preset, label]) => (
+              <button
+                key={preset}
+                type="button"
+                className="btn small ghost"
+                onClick={() => void onSetReminder(presetDue(preset))}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="sheet-actions">
           <button
             className="btn danger"
@@ -1450,7 +1844,7 @@ function EditItemSheet({
             className="btn"
             onClick={async () => {
               try {
-                await api.updateItem(item.id, { name, quantity, notes, category });
+                await api.updateItem(item.id, { name, quantity, notes, category, sectionId: sectionId || null });
                 await onRefresh();
                 onClose();
               } catch (error) {

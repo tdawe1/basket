@@ -169,6 +169,120 @@ describe("api", { concurrency: 1 }, () => {
     assert.equal(empty.lists.length, 0);
   });
 
+  it("list subsections group items and clear on delete", async () => {
+    cookieJar.clear();
+    const created = await api("/api/auth/register", {
+      body: {
+        householdName: "Section House",
+        displayName: "Sam",
+        username: "sam_sections",
+        password: "password1",
+      },
+    });
+    assert.equal(created.status, 200);
+    const boot = (await api("/api/bootstrap")).json as {
+      lists: Array<{ id: string }>;
+      sections: unknown[];
+    };
+    const listId = boot.lists[0].id;
+    assert.equal(boot.sections.length, 0);
+
+    const noName = await api(`/api/lists/${listId}/sections`, { body: { name: " " } });
+    assert.equal(noName.status, 400);
+
+    const section = (
+      await api(`/api/lists/${listId}/sections`, { body: { name: "Freezer" } })
+    ).json as { id: string; listId: string; name: string };
+    assert.equal(section.name, "Freezer");
+    assert.equal(section.listId, listId);
+
+    const foreign = await api("/api/lists/no-such-list/sections", { body: { name: "X" } });
+    assert.equal(foreign.status, 404);
+
+    const item = (
+      await api(`/api/lists/${listId}/items`, { body: { name: "Peas", sectionId: section.id } })
+    ).json as { id: string; sectionId: string | null };
+    assert.equal(item.sectionId, section.id);
+
+    const badSection = await api(`/api/lists/${listId}/items`, {
+      body: { name: "Beans", sectionId: "no-such-section" },
+    });
+    assert.equal(badSection.status, 404);
+
+    const moved = (
+      await api(`/api/items/${item.id}`, { method: "PATCH", body: { sectionId: null } })
+    ).json as { sectionId: string | null };
+    assert.equal(moved.sectionId, null);
+
+    const renamed = (
+      await api(`/api/sections/${section.id}`, { method: "PATCH", body: { name: "Deep freeze" } })
+    ).json as { name: string };
+    assert.equal(renamed.name, "Deep freeze");
+
+    const withItems = (
+      await api(`/api/lists/${listId}/items`, { body: { name: "Fish", sectionId: section.id } })
+    ).json as { id: string };
+    const removed = await api(`/api/sections/${section.id}`, { method: "DELETE" });
+    assert.equal(removed.status, 204);
+    const freed = (
+      await api(`/api/items/${withItems.id}`, { method: "PATCH", body: { checked: true } })
+    ).json as { sectionId: string | null };
+    assert.equal(freed.sectionId, null);
+
+    const listed = (await api("/api/bootstrap")).json as { sections: unknown[] };
+    assert.equal(listed.sections.length, 0);
+  });
+
+  it("item reminders attach to items and clear on delete", async () => {
+    cookieJar.clear();
+    const created = await api("/api/auth/register", {
+      body: {
+        householdName: "Reminder House",
+        displayName: "Jo",
+        username: "jo_remind",
+        password: "password1",
+      },
+    });
+    assert.equal(created.status, 200);
+    const boot = (await api("/api/bootstrap")).json as { lists: Array<{ id: string }> };
+    const listId = boot.lists[0].id;
+
+    const item = (
+      await api(`/api/lists/${listId}/items`, { body: { name: "Milk" } })
+    ).json as { id: string };
+
+    const missing = await api("/api/reminders", {
+      body: { kind: "item", dueAt: Date.now() + 3600000 },
+    });
+    assert.equal(missing.status, 400);
+
+    const foreign = await api("/api/reminders", {
+      body: { kind: "item", itemId: "no-such-item", dueAt: Date.now() + 3600000 },
+    });
+    assert.equal(foreign.status, 404);
+
+    const dueAt = Date.now() + 3600000;
+    const reminder = (
+      await api("/api/reminders", { body: { kind: "item", itemId: item.id, dueAt } })
+    ).json as { id: string; kind: string; itemId: string | null; listId: string | null; title: string };
+    assert.equal(reminder.kind, "item");
+    assert.equal(reminder.itemId, item.id);
+    assert.equal(reminder.listId, listId);
+    assert.equal(reminder.title, "Buy Milk");
+
+    const listed = (await api("/api/bootstrap")).json as {
+      reminders: Array<{ id: string }>;
+    };
+    assert.ok(listed.reminders.some((r) => r.id === reminder.id));
+
+    const gone = await api(`/api/items/${item.id}`, { method: "DELETE" });
+    assert.equal(gone.status, 204);
+    const after = (await api("/api/bootstrap")).json as {
+      reminders: Array<{ id: string }>;
+    };
+    assert.ok(!after.reminders.some((r) => r.id === reminder.id));
+  });
+
   it("login and duplicate username", async () => {
     cookieJar.clear();
     const bad = await api("/api/auth/login", { body: { username: "alex", password: "nope-nope" } });
@@ -377,6 +491,159 @@ describe("api", { concurrency: 1 }, () => {
       body: { username: "throttleuser", password: "wrong-password" },
     });
     assert.equal(blocked.status, 429);
+  });
+
+  it("vault sync requires a secret and a cache key", async () => {
+    delete process.env.VAULT_SYNC_SECRET;
+    delete process.env.VAULT_CACHE_KEY;
+    const noSecret = await api("/api/vault/sync", {
+      method: "POST",
+      body: { vault: "Shared", items: [] },
+    });
+    assert.equal(noSecret.status, 503);
+    process.env.VAULT_SYNC_SECRET = "test-sync-secret";
+    try {
+      const noKey = await app.request("/api/vault/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-vault-sync-secret": "test-sync-secret" },
+        body: JSON.stringify({ vault: "Shared", items: [] }),
+      });
+      assert.equal(noKey.status, 503);
+    } finally {
+      delete process.env.VAULT_SYNC_SECRET;
+    }
+  });
+
+  it("vault sync encrypts the cache and gates reads by household", async () => {
+    process.env.VAULT_SYNC_SECRET = "test-sync-secret";
+    process.env.VAULT_CACHE_KEY = "test-cache-key";
+    try {
+      async function authed(path: string, cookie: string) {
+        const res = await app.request(path, { headers: { cookie } });
+        const json = (await res.json().catch(() => null)) as unknown;
+        return { status: res.status, json };
+      }
+      cookieJar.clear();
+      assert.equal(
+        (
+          await api("/api/auth/register", {
+            body: {
+              householdName: "Vault House",
+              displayName: "Sam",
+              username: "sam_vault",
+              password: "password1",
+            },
+          })
+        ).status,
+        200,
+      );
+      const cookie1 = cookieHeader();
+      const house1 = ((await api("/api/bootstrap")).json as { household: { id: string } }).household.id;
+
+      const payload = {
+        vault: "Shared",
+        items: [
+          {
+            id: "cache-id-1",
+            state: "Active",
+            content: {
+              title: "example.com",
+              note: "shared login",
+              content: { Login: { username: "sam", password: "s3cret", urls: ["https://example.com"] } },
+            },
+          },
+          { state: "Active", content: null },
+          { id: "trashed-1", state: "Trashed", content: { title: "old", note: "", content: {} } },
+        ],
+      };
+      const denied = await app.request("/api/vault/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-vault-sync-secret": "wrong" },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(denied.status, 401);
+
+      const tooLarge = await app.request("/api/vault/sync", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(3 * 1024 * 1024),
+          "x-vault-sync-secret": "test-sync-secret",
+        },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(tooLarge.status, 413);
+
+      const synced = await app.request("/api/vault/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-vault-sync-secret": "test-sync-secret" },
+        body: JSON.stringify({ ...payload, vault: "Evil" }),
+      });
+      assert.equal(synced.status, 200);
+      const result = (await synced.json()) as { updated: number; vault: string };
+      assert.equal(result.updated, 1);
+      assert.equal(result.vault, "Shared");
+
+      const status = (await authed("/api/vault/status", cookie1)).json as {
+        configured: boolean;
+        source: string;
+        count: number;
+      };
+      assert.equal(status.configured, true);
+      assert.equal(status.source, "cache");
+      assert.equal(status.count, 1);
+
+      const list = (await authed("/api/vault/items", cookie1)).json as {
+        vault: string;
+        items: Array<{ id: string; title: string }>;
+      };
+      assert.equal(list.items.length, 1);
+      assert.equal(list.items[0].title, "example.com");
+
+      const detail = (await authed("/api/vault/items/cache-id-1", cookie1)).json as {
+        fields: { Login: { username: string } };
+      };
+      assert.equal(detail.fields.Login.username, "sam");
+
+      assert.equal((await authed("/api/vault/items/no-such-id", cookie1)).status, 404);
+      assert.equal((await authed("/api/vault/items/trashed-1", cookie1)).status, 404);
+
+      // Wrong cache key: titles list, secrets do not open.
+      process.env.VAULT_CACHE_KEY = "wrong-key";
+      assert.equal((await authed("/api/vault/items", cookie1)).status, 200);
+      assert.equal((await authed("/api/vault/items/cache-id-1", cookie1)).status, 503);
+      process.env.VAULT_CACHE_KEY = "test-cache-key";
+
+      // Second household is locked out once the vault is pinned to the first.
+      cookieJar.clear();
+      assert.equal(
+        (
+          await api("/api/auth/register", {
+            body: {
+              householdName: "Other House",
+              displayName: "Jo",
+              username: "jo_other",
+              password: "password1",
+            },
+          })
+        ).status,
+        200,
+      );
+      const cookie2 = cookieHeader();
+      process.env.VAULT_HOUSEHOLD_ID = house1;
+      try {
+        assert.equal((await authed("/api/vault/status", cookie2)).status, 403);
+        assert.equal((await authed("/api/vault/items", cookie2)).status, 403);
+        assert.equal((await authed("/api/vault/items/cache-id-1", cookie1)).status, 200);
+      } finally {
+        delete process.env.VAULT_HOUSEHOLD_ID;
+      }
+      assert.equal((await authed("/api/vault/items", cookie2)).status, 200);
+    } finally {
+      delete process.env.VAULT_SYNC_SECRET;
+      delete process.env.VAULT_CACHE_KEY;
+      delete process.env.VAULT_HOUSEHOLD_ID;
+    }
   });
 
   it("register rolls back so a failed attempt leaves no extra household", async () => {

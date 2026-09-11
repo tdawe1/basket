@@ -13,6 +13,7 @@ import {
   newId,
   newInviteCode,
   recordLoginFailure,
+  timingSafeEqual,
   validateDisplayName,
   validatePassword,
   validateUsername,
@@ -26,15 +27,19 @@ import {
   getListForHousehold,
   getNoteForHousehold,
   getReminderForHousehold,
+  getSectionForHousehold,
   getSessionUser,
   getUserByUsername,
   listItems,
   listLists,
   listNotes,
   listReminders,
+  listSections,
   mapList,
+  mapSection,
   memberCount,
   nextListSort,
+  nextSectionSort,
   suggestions,
   type UserRow,
 } from "./db.ts";
@@ -58,6 +63,7 @@ import {
   type OAuthMode,
 } from "./oauth.ts";
 import type { Sql } from "./sql.ts";
+import { getCachedItem, listCachedItems, listVaultItems, normalizeExportedItem, replaceVaultCache, vaultCacheMeta, vaultConfig, viewVaultItem, type VaultCacheEntry } from "./vault.ts";
 
 export type AppBindings = {
   DB?: unknown;
@@ -71,6 +77,12 @@ export type AppBindings = {
   APPLE_KEY_ID?: string;
   APPLE_PRIVATE_KEY?: string;
   OAUTH_REDIRECT_BASE?: string;
+  PROTON_PASS_PERSONAL_ACCESS_TOKEN?: string;
+  PROTON_PASS_VAULT?: string;
+  PASS_CLI_BIN?: string;
+  VAULT_SYNC_SECRET?: string;
+  VAULT_CACHE_KEY?: string;
+  VAULT_HOUSEHOLD_ID?: string;
 };
 
 type Env = {
@@ -80,6 +92,39 @@ type Env = {
 
 function clip(value: unknown, max: number): string {
   return String(value ?? "").trim().slice(0, max);
+}
+
+function secretsEqual(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const enc = new TextEncoder();
+  return timingSafeEqual(enc.encode(a), enc.encode(b));
+}
+
+async function resolveItemSection(
+  sql: Sql,
+  raw: unknown,
+  listId: string,
+  householdId: string,
+): Promise<{ sectionId: string } | { error: string; status: number }> {
+  if (typeof raw !== "string" || !raw) return { sectionId: "" };
+  const section = await getSectionForHousehold(sql, raw, householdId);
+  if (!section) return { error: "Subsection not found.", status: 404 };
+  if (section.listId !== listId) return { error: "Subsection does not belong to this list.", status: 400 };
+  return { sectionId: section.id };
+}
+
+function vaultEnv(bindings: Record<string, unknown>, key: string): string | undefined {
+  const fromBindings = bindings[key];
+  if (typeof fromBindings === "string" && fromBindings) return fromBindings;
+  return nodeEnv(key);
+}
+
+// When VAULT_HOUSEHOLD_ID is set, only that household may read the cache.
+// Unset keeps single-household behavior (any signed-in user).
+function vaultVisible(user: UserRow, bindings: Record<string, unknown>): boolean {
+  const householdId = vaultEnv(bindings, "VAULT_HOUSEHOLD_ID");
+  if (!householdId) return true;
+  return user.household_id === householdId;
 }
 
 function cookieSecure(c: Context<Env>): boolean {
@@ -522,6 +567,7 @@ export function createApp(
       },
       household,
       lists: await listLists(sql, user.household_id),
+      sections: await listSections(sql, user.household_id),
       items: await listItems(sql, user.household_id),
       reminders: await listReminders(sql, user.household_id),
       notes: await listNotes(sql, user.household_id),
@@ -596,7 +642,61 @@ export function createApp(
     if (!existing) return c.json({ error: "List not found." }, 404);
     await sql.transaction(async () => {
       await sql.run("DELETE FROM items WHERE list_id = ?", id);
+      await sql.run("DELETE FROM sections WHERE list_id = ?", id);
       await sql.run("DELETE FROM lists WHERE id = ?", id);
+    });
+    return c.body(null, 204);
+  });
+
+  app.post("/api/lists/:id/sections", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const listId = c.req.param("id");
+    if (!(await getListForHousehold(sql, listId, user.household_id))) {
+      return c.json({ error: "List not found." }, 404);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const name = clip(body.name, 40);
+    if (!name) return c.json({ error: "Subsection name is required." }, 400);
+    const now = Date.now();
+    const id = newId();
+    const sort = await nextSectionSort(sql, listId);
+    await sql.run(
+      "INSERT INTO sections (id, list_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?)",
+      id,
+      listId,
+      name,
+      sort,
+      now,
+    );
+    return c.json(mapSection({ id, list_id: listId, name, sort_order: sort, created_at: now }));
+  });
+
+  app.patch("/api/sections/:id", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const id = c.req.param("id");
+    const existing = await getSectionForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Subsection not found." }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const name = body.name !== undefined ? clip(body.name, 40) : existing.name;
+    if (!name) return c.json({ error: "Subsection name is required." }, 400);
+    await sql.run("UPDATE sections SET name = ? WHERE id = ?", name, id);
+    return c.json({ ...existing, name });
+  });
+
+  app.delete("/api/sections/:id", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const sql = c.get("sql");
+    const id = c.req.param("id");
+    const existing = await getSectionForHousehold(sql, id, user.household_id);
+    if (!existing) return c.json({ error: "Subsection not found." }, 404);
+    await sql.transaction(async () => {
+      await sql.run("UPDATE items SET section_id = '' WHERE section_id = ?", id);
+      await sql.run("DELETE FROM sections WHERE id = ?", id);
     });
     return c.body(null, 204);
   });
@@ -623,17 +723,20 @@ export function createApp(
     const notes = clip(body.notes, 240);
     let category = clip(body.category, 32);
     if (!CATEGORY_IDS.has(category)) category = guessCategory(name);
+    const resolved = await resolveItemSection(sql, body.sectionId, listId, user.household_id);
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status as 400 | 404);
     const now = Date.now();
     const id = newId();
     await sql.run(
-      `INSERT INTO items (id, list_id, name, quantity, category, notes, checked, added_by, checked_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)`,
+      `INSERT INTO items (id, list_id, name, quantity, category, notes, checked, section_id, added_by, checked_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, ?, ?)`,
       id,
       listId,
       name,
       quantity,
       category,
       notes,
+      resolved.sectionId,
       user.id,
       now,
       now,
@@ -656,17 +759,23 @@ export function createApp(
     const notes = body.notes !== undefined ? clip(body.notes, 240) : existing.notes;
     let category = body.category !== undefined ? clip(body.category, 32) : existing.category;
     if (!CATEGORY_IDS.has(category)) category = existing.category;
-
+    const sectionResolved =
+      body.sectionId !== undefined
+        ? await resolveItemSection(sql, body.sectionId, existing.listId, user.household_id)
+        : null;
+    if (sectionResolved && "error" in sectionResolved) {
+      return c.json({ error: sectionResolved.error }, sectionResolved.status as 400 | 404);
+    }
+    const sectionId = sectionResolved ? sectionResolved.sectionId : (existing.sectionId ?? "");
     let checked = existing.checked ? 1 : 0;
     let checkedBy: string | null = existing.checkedBy?.id ?? null;
     if (typeof body.checked === "boolean") {
       checked = body.checked ? 1 : 0;
       checkedBy = body.checked ? user.id : null;
     }
-
     const now = Date.now();
     await sql.run(
-      `UPDATE items SET name = ?, quantity = ?, category = ?, notes = ?, checked = ?, checked_by = ?, updated_at = ?
+      `UPDATE items SET name = ?, quantity = ?, category = ?, notes = ?, checked = ?, checked_by = ?, section_id = ?, updated_at = ?
        WHERE id = ?`,
       name,
       quantity,
@@ -674,6 +783,7 @@ export function createApp(
       notes,
       checked,
       checkedBy,
+      sectionId,
       now,
       id,
     );
@@ -687,7 +797,10 @@ export function createApp(
     const id = c.req.param("id");
     const existing = await getItemForHousehold(sql, id, user.household_id);
     if (!existing) return c.json({ error: "Item not found." }, 404);
-    await sql.run("DELETE FROM items WHERE id = ?", id);
+    await sql.transaction(async () => {
+      await sql.run("DELETE FROM reminders WHERE item_id = ?", id);
+      await sql.run("DELETE FROM items WHERE id = ?", id);
+    });
     return c.body(null, 204);
   });
 
@@ -696,11 +809,12 @@ export function createApp(
     if (!isUser(user)) return user;
     const sql = c.get("sql");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const kind = body.kind === "nudge" ? "nudge" : body.kind === "trip" ? "trip" : "";
+    const kind =
+      body.kind === "nudge" ? "nudge" : body.kind === "trip" ? "trip" : body.kind === "item" ? "item" : "";
     if (!kind) return c.json({ error: "Reminder type is required." }, 400);
 
     const listIdRaw = clip(body.listId, 40);
-    const listId = listIdRaw || null;
+    let listId = listIdRaw || null;
     let listName = "";
     let listEmoji = "";
     if (listId) {
@@ -709,6 +823,18 @@ export function createApp(
       listName = list.name;
       listEmoji = list.emoji;
     }
+
+    const itemIdRaw = typeof body.itemId === "string" ? body.itemId : "";
+    let itemId: string | null = null;
+    let itemName = "";
+    if (itemIdRaw) {
+      const item = await getItemForHousehold(sql, itemIdRaw, user.household_id);
+      if (!item) return c.json({ error: "Item not found." }, 404);
+      itemId = item.id;
+      itemName = item.name;
+      if (!listId) listId = item.listId;
+    }
+    if (kind === "item" && !itemId) return c.json({ error: "Item is required." }, 400);
 
     const now = Date.now();
     let dueAt = Number(body.dueAt);
@@ -731,18 +857,21 @@ export function createApp(
         ? listName
           ? `Nudge: ${listName}`
           : "Nudge"
-        : listName
-          ? `Shop: ${listEmoji} ${listName}`
-          : "Shopping trip";
+        : kind === "item"
+          ? `Buy ${itemName}`
+          : listName
+            ? `Shop: ${listEmoji} ${listName}`
+            : "Shopping trip";
     const title = clip(body.title, 120) || fallback;
 
     const id = newId();
     await sql.run(
-      `INSERT INTO reminders (id, household_id, list_id, kind, title, due_at, duration_min, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO reminders (id, household_id, list_id, item_id, kind, title, due_at, duration_min, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       user.household_id,
       listId,
+      itemId,
       kind,
       title,
       dueAt,
@@ -924,6 +1053,99 @@ export function createApp(
       return found;
     });
     return c.json({ removed: rows.length });
+  });
+  app.get("/api/vault/status", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const bindings = (c.env ?? {}) as Record<string, unknown>;
+    if (!vaultVisible(user, bindings)) return c.json({ error: "Shared passwords are not available." }, 403);
+    const cfg = vaultConfig(bindings);
+    const meta = await vaultCacheMeta(c.get("sql"), cfg.vault).catch(() => ({ count: 0, syncedAt: null }));
+    const unlocked = meta.count > 0 && !!vaultEnv(bindings, "VAULT_CACHE_KEY");
+    const source = unlocked ? "cache" : cfg.configured ? "live" : "unavailable";
+    return c.json({
+      configured: cfg.configured || unlocked,
+      vault: cfg.vault,
+      source,
+      syncedAt: meta.syncedAt,
+      count: meta.count,
+    });
+  });
+
+  app.get("/api/vault/items", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const bindings = (c.env ?? {}) as Record<string, unknown>;
+    if (!vaultVisible(user, bindings)) return c.json({ error: "Shared passwords are not available." }, 403);
+    const sql = c.get("sql");
+    const cfg = vaultConfig(bindings);
+    if (vaultEnv(bindings, "VAULT_CACHE_KEY")) {
+      const cached = await listCachedItems(sql, cfg.vault).catch(() => []);
+      if (cached.length > 0) return c.json({ vault: cfg.vault, items: cached });
+    }
+    try {
+      return c.json(await listVaultItems(bindings));
+    } catch {
+      return c.json({ error: "Shared passwords are not available." }, 503);
+    }
+  });
+
+  app.get("/api/vault/items/:id", async (c) => {
+    const user = await requireUser(c);
+    if (!isUser(user)) return user;
+    const bindings = (c.env ?? {}) as Record<string, unknown>;
+    if (!vaultVisible(user, bindings)) return c.json({ error: "Shared passwords are not available." }, 403);
+    const sql = c.get("sql");
+    const cfg = vaultConfig(bindings);
+    const key = vaultEnv(bindings, "VAULT_CACHE_KEY");
+    const meta = await vaultCacheMeta(sql, cfg.vault).catch(() => ({ count: 0, syncedAt: null }));
+    if (meta.count > 0 && !key) return c.json({ error: "Shared passwords are not available." }, 503);
+    if (key) {
+      try {
+        const cached = await getCachedItem(sql, cfg.vault, c.req.param("id"), key);
+        if (cached) return c.json(cached);
+      } catch {
+        return c.json({ error: "Shared passwords are not available." }, 503);
+      }
+      if (meta.count > 0) return c.json({ error: "Unknown password entry." }, 404);
+    }
+    try {
+      return c.json(await viewVaultItem(c.req.param("id"), bindings));
+    } catch (error) {
+      const message = error instanceof Error && error.message === "Unknown password entry."
+        ? "Unknown password entry."
+        : "Shared passwords are not available.";
+      const status = message === "Unknown password entry." ? 404 : 503;
+      return c.json({ error: message }, status);
+    }
+  });
+  app.post("/api/vault/sync", async (c) => {
+    const bindings = (c.env ?? {}) as Record<string, unknown>;
+    const secret = typeof bindings.VAULT_SYNC_SECRET === "string" && bindings.VAULT_SYNC_SECRET
+      ? bindings.VAULT_SYNC_SECRET
+      : nodeEnv("VAULT_SYNC_SECRET");
+    if (!secret) return c.json({ error: "Shared passwords are not available." }, 503);
+    const header = c.req.header("x-vault-sync-secret") ?? "";
+    if (!secretsEqual(header, secret)) return c.json({ error: "Please sign in." }, 401);
+    const cacheKey = vaultEnv(bindings, "VAULT_CACHE_KEY");
+    if (!cacheKey) return c.json({ error: "Shared passwords are not available." }, 503);
+    // Bound the body before parsing: the cache caps at 5000 items x 20KB.
+    const contentLength = Number(c.req.header("content-length") ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > 2 * 1024 * 1024) {
+      return c.json({ error: "Request is too large." }, 413);
+    }
+    const cfg = vaultConfig(bindings);
+    // The vault bucket is server-pinned: callers cannot write arbitrary buckets.
+    const vault = cfg.vault;
+    const body = (await c.req.json().catch(() => ({}))) as { items?: unknown };
+    if (!Array.isArray(body.items)) return c.json({ error: "Items are required." }, 400);
+    const entries: VaultCacheEntry[] = [];
+    for (const raw of body.items.slice(0, 5000)) {
+      const entry = normalizeExportedItem(raw);
+      if (entry) entries.push(entry);
+    }
+    const updated = await replaceVaultCache(c.get("sql"), vault, entries, cacheKey);
+    return c.json({ vault, updated });
   });
 
   return app;
