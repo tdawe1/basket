@@ -270,6 +270,17 @@ describe("api", { concurrency: 1 }, () => {
     assert.equal(reminder.listId, listId);
     assert.equal(reminder.title, "Buy Milk");
 
+    const otherList = (
+      await api("/api/lists", { body: { name: "Other" } })
+    ).json as { id: string };
+    const pinned = (
+      await api("/api/reminders", {
+        body: { kind: "item", itemId: item.id, listId: otherList.id, dueAt: Date.now() + 3600000 },
+      })
+    ).json as { id: string; listId: string | null };
+    assert.equal(pinned.listId, listId);
+    await api(`/api/reminders/${pinned.id}`, { method: "DELETE" });
+
     const listed = (await api("/api/bootstrap")).json as {
       reminders: Array<{ id: string }>;
     };
@@ -583,6 +594,34 @@ describe("api", { concurrency: 1 }, () => {
       const result = (await synced.json()) as { updated: number; vault: string };
       assert.equal(result.updated, 1);
       assert.equal(result.vault, "Shared");
+
+      const huge = await app.request("/api/vault/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-vault-sync-secret": "test-sync-secret" },
+        body: JSON.stringify({
+          items: [
+            {
+              id: "cache-id-2",
+              state: "Active",
+              content: { title: "small", note: "", content: { Login: { username: "jo" } } },
+            },
+            {
+              id: "cache-id-huge",
+              state: "Active",
+              content: { title: "huge", note: "x".repeat(200_000), content: {} },
+            },
+          ],
+        }),
+      });
+      assert.equal(huge.status, 200);
+      assert.equal(((await huge.json()) as { updated: number }).updated, 1);
+      assert.equal((await authed("/api/vault/items/cache-id-huge", cookie1)).status, 404);
+      const restored = await app.request("/api/vault/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-vault-sync-secret": "test-sync-secret" },
+        body: JSON.stringify({ ...payload, vault: "Evil" }),
+      });
+      assert.equal(restored.status, 200);
 
       const status = (await authed("/api/vault/status", cookie1)).json as {
         configured: boolean;

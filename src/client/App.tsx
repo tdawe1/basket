@@ -1074,7 +1074,7 @@ function ListBody({
     items: unchecked.filter((i) => i.sectionId === s.id),
   }));
 
-  if (items.length === 0) {
+  if (items.length === 0 && sections.length === 0) {
     return (
       <div className="list-body">
         <div className="empty">

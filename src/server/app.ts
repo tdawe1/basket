@@ -192,6 +192,37 @@ function fileTooLarge(cap: number): string {
   if (cap >= 1024 * 1024) return `File is too large (max ${Math.round(cap / (1024 * 1024))} MB).`;
   return `File is too large (max ${Math.round(cap / 1024)} KB).`;
 }
+// Cap for the vault-sync payload (the cache holds at most 5000 items).
+const SYNC_MAX_BYTES = 2 * 1024 * 1024;
+// Cap per synced item before sealing; one monster must not starve the sync.
+const SYNC_MAX_ITEM_BYTES = 100_000;
+
+// Reads the request body with a hard byte budget. content-length is absent on
+// chunked posts, so streaming with a budget is the only real limit. Returns
+// null when the body exceeds maxBytes.
+async function readBoundedText(req: Request, maxBytes: number): Promise<string | null> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, off);
+    off += chunk.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
 
 export function createApp(
   getSql: (c: Context<Env>) => Sql | Promise<Sql>,
@@ -824,7 +855,10 @@ export function createApp(
       listEmoji = list.emoji;
     }
 
-    const itemIdRaw = typeof body.itemId === "string" ? body.itemId : "";
+    // Items only attach to kind=item reminders; other kinds ignore itemId so
+    // no stray item_id is stored (and later cascaded). Item reminders are
+    // pinned to their item's list: a mismatched client listId is not honored.
+    const itemIdRaw = kind === "item" && typeof body.itemId === "string" ? body.itemId : "";
     let itemId: string | null = null;
     let itemName = "";
     if (itemIdRaw) {
@@ -832,7 +866,10 @@ export function createApp(
       if (!item) return c.json({ error: "Item not found." }, 404);
       itemId = item.id;
       itemName = item.name;
-      if (!listId) listId = item.listId;
+      listId = item.listId;
+      const list = listId ? await getListForHousehold(sql, listId, user.household_id) : undefined;
+      listName = list?.name ?? "";
+      listEmoji = list?.emoji ?? "";
     }
     if (kind === "item" && !itemId) return c.json({ error: "Item is required." }, 400);
 
@@ -1129,19 +1166,30 @@ export function createApp(
     if (!secretsEqual(header, secret)) return c.json({ error: "Please sign in." }, 401);
     const cacheKey = vaultEnv(bindings, "VAULT_CACHE_KEY");
     if (!cacheKey) return c.json({ error: "Shared passwords are not available." }, 503);
-    // Bound the body before parsing: the cache caps at 5000 items x 20KB.
+    // Bound the body by its actual size: content-length is absent on chunked
+    // posts, so it is only a fast path before the budgeted stream read.
     const contentLength = Number(c.req.header("content-length") ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > 2 * 1024 * 1024) {
+    if (Number.isFinite(contentLength) && contentLength > SYNC_MAX_BYTES) {
       return c.json({ error: "Request is too large." }, 413);
     }
     const cfg = vaultConfig(bindings);
     // The vault bucket is server-pinned: callers cannot write arbitrary buckets.
     const vault = cfg.vault;
-    const body = (await c.req.json().catch(() => ({}))) as { items?: unknown };
+    const raw = await readBoundedText(c.req.raw, SYNC_MAX_BYTES);
+    if (raw === null) return c.json({ error: "Request is too large." }, 413);
+    let parsed: unknown = {};
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = {};
+    }
+    const body = (parsed ?? {}) as { items?: unknown };
     if (!Array.isArray(body.items)) return c.json({ error: "Items are required." }, 400);
     const entries: VaultCacheEntry[] = [];
-    for (const raw of body.items.slice(0, 5000)) {
-      const entry = normalizeExportedItem(raw);
+    for (const rawItem of body.items.slice(0, 5000)) {
+      const text = JSON.stringify(rawItem) ?? "";
+      if (!text || text.length > SYNC_MAX_ITEM_BYTES) continue;
+      const entry = normalizeExportedItem(rawItem);
       if (entry) entries.push(entry);
     }
     const updated = await replaceVaultCache(c.get("sql"), vault, entries, cacheKey);

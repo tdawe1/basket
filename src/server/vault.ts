@@ -91,6 +91,10 @@ type ViewJson = {
 
 const cache = new Map<string, { at: number; value: VaultItemSummary[] }>();
 const CACHE_MS = 60_000;
+// Sealed-field envelopes must fit the vault_items.fields column intact.
+// Oversized entries are rejected, never truncated: a sliced envelope can
+// never authenticate, so truncation would silently brick the item.
+const MAX_SEALED = 30000;
 
 function asSummary(row: NonNullable<ListJson["items"]>[number]): VaultItemSummary | null {
   if (typeof row.id !== "string" || !row.id) return null;
@@ -377,7 +381,9 @@ export async function replaceVaultCache(
   const clean = entries.filter((e) => isVaultItemId(e.id)).slice(0, 5000);
   const sealed: Array<{ entry: VaultCacheEntry; fields: string }> = [];
   for (const e of clean) {
-    sealed.push({ entry: e, fields: await sealFields(secret, vault, e.id, e.fields) });
+    const fields = await sealFields(secret, vault, e.id, e.fields);
+    if (fields.length > MAX_SEALED) continue;
+    sealed.push({ entry: e, fields });
   }
   await sql.transaction(async () => {
     await sql.run("DELETE FROM vault_items WHERE vault = ?", vault);
@@ -390,10 +396,10 @@ export async function replaceVaultCache(
         e.itemType.slice(0, 40),
         e.state.slice(0, 20),
         e.note.slice(0, 2000),
-        fields.slice(0, 30000),
+        fields,
         now,
       );
     }
   });
-  return clean.length;
+  return sealed.length;
 }

@@ -8,4 +8,7 @@ CREATE TABLE IF NOT EXISTS sections (
 
 CREATE INDEX IF NOT EXISTS idx_sections_list ON sections(list_id, sort_order);
 
-ALTER TABLE items ADD COLUMN section_id TEXT NOT NULL DEFAULT '';
+-- items.section_id is owned by ensureSchema (src/server/sql.ts), which every
+-- backend runs with a tolerant ALTER. An unconditional ALTER TABLE here would
+-- fail with a duplicate-column error on any database the self-heal already
+-- patched, aborting the migration run.
