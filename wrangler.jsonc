@@ -5,6 +5,9 @@
   "compatibility_date": "2026-08-21",
   "workers_dev": true,
   "preview_urls": true,
+  "vars": {
+    "OAUTH_REDIRECT_BASE": "https://basket.dawe.dev"
+  },
   "routes": [
     {
       "pattern": "basket.dawe.dev",
